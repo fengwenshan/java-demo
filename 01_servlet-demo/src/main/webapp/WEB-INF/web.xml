@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
+                             https://jakarta.ee/xml/ns/jakartaee/web-app_6_0.xsd"
+         version="6.0">
+
+    <display-name>Servlet Demo</display-name>
+
+    <!--
+        访问地址（端口 10800，上下文路径看 IDEA Deployment 中的 Application context）：
+
+        http://localhost:10800/    01_servlet_archive    /hello
+                                ↑                 ↑          ↑
+                               端口            上下文路径    url-pattern
+    -->
+
+    <servlet>
+        <servlet-name>HelloServlet</servlet-name>
+        <servlet-class>com.wenshan.servlet.HelloServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>HelloServlet</servlet-name>
+        <url-pattern>/hello</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>LifecycleServlet</servlet-name>
+        <servlet-class>com.wenshan.servlet.LifecycleServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>LifecycleServlet</servlet-name>
+        <url-pattern>/lifecycle</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>RequestInfoServlet</servlet-name>
+        <servlet-class>com.wenshan.servlet.RequestInfoServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>RequestInfoServlet</servlet-name>
+        <url-pattern>/request-info</url-pattern>
+    </servlet-mapping>
+
+</web-app>

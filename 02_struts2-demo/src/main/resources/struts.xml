@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE struts PUBLIC
+    "-//Apache Software Foundation//DTD Struts Configuration 6.0//EN"
+    "https://struts.apache.org/dtds/struts-6.0.dtd">
+
+<struts>
+    <!-- 开发模式：自动重载配置，输出更多调试信息 -->
+    <constant name="struts.devMode" value="true"/>
+
+    <package name="default" extends="struts-default">
+        <!--
+            HelloAction:
+            访问 /hello → execute() → 跳转 success 页面
+        -->
+        <action name="hello" class="com.wenshan.struts2.action.HelloAction">
+            <result name="success">/pages/hello.jsp</result>
+        </action>
+
+        <!--
+            LoginAction:
+            GET  /login  → input  → 显示登录表单
+            POST /login  → execute → 跳转欢迎页
+        -->
+        <action name="login" class="com.wenshan.struts2.action.LoginAction">
+            <result name="success">/pages/welcome.jsp</result>
+            <result name="input">/pages/login.jsp</result>
+        </action>
+    </package>
+</struts>
