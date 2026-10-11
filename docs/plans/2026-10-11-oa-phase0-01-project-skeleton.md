@@ -1,5 +1,19 @@
 # OA 工程骨架 Implementation Plan
 
+> ⚠️ **本计划已被 [R01 部门管理](../requirements/R01-部门管理.md) 取代，不要直接执行。**
+>
+> 取代的原因：本计划要求一次性把 4 个 Maven 模块、统一返回体、链路追踪、多环境配置、
+> Flyway、OpenAPI、协作规范全部建完，再写第一行业务代码。这对"从零开始"的阶段过重——
+> 基础设施应当由具体需求倒推着建，而不是提前建好等需求来用。
+>
+> R01 改用**单模块起步**：先写出一个能跑的部门管理功能，包结构按未来的模块边界划分，
+> 等代码量真的撑得起模块拆分时再拆。
+>
+> 本计划仍有参考价值的部分：技术栈版本选型（第 0 节的环境前置、第 1 节的设计决策）、
+> 以及「哪些东西属于基础设施」的清单。**这些内容已在 R01 中按需取用。**
+>
+> 保留此文件是为了记录决策过程，不再作为执行依据。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立 OA 系统的独立 Maven 多模块骨架，具备统一返回体、全局异常处理、参数校验、traceId 链路追踪、多环境与敏感配置外置、Flyway 数据库版本管理、MyBatis 纵向切片、OpenAPI 接口文档，并可通过端到端冒烟验证。
