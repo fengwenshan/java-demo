@@ -75,19 +75,23 @@ oa (聚合工程)
 
 ### 3.3 技术栈
 
-| 层次 | 选型 |
-|---|---|
-| 后端框架 | Spring Boot 3.3.5 |
-| 持久层 | MyBatis 3.5.x + 手写 SQL（复用现有技术栈） |
-| 数据库 | MySQL 9.x |
-| 缓存 / 会话 / 分布式锁 | Redis |
-| 工作流 | Flowable 7.x（需与 Spring Boot 3.x 匹配） |
-| 认证 | Sa-Token 或 Spring Security + JWT（第 0 期第一周定稿） |
-| 数据库版本管理 | Flyway |
-| 文件存储 | MinIO（抽象接口，可切换 OSS） |
-| 接口契约 | OpenAPI 3 |
-| 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia |
-| 部署 | Nginx + 应用 + MySQL + Redis + MinIO，Docker Compose 起步 |
+| 层次 | 选型 | 版本依据 |
+|---|---|---|
+| 后端框架 | Spring Boot **4.0.8** | 3.3.5 发布于 2024-10，已停止维护；4.0.8 为 2026-08 在维护版本，且与 Flowable 8.0.0 的目标版本（4.0.2）同一分支 |
+| 持久层 | MyBatis Spring Boot Starter **4.1.0** + 手写 SQL | MyBatis 4.x 对应 Boot 4 |
+| 数据库驱动 | mysql-connector-j **9.7.0** | 由 Boot 4.0.8 BOM 管理，且与线上 MySQL 服务端 9.7.0 完全一致 |
+| 数据库 | MySQL 9.x | 现网版本 |
+| 缓存 / 会话 / 分布式锁 | Redis | — |
+| 工作流 | Flowable **8.0.0** | 唯一支持 Boot 4 的已发布版本（其 `spring.boot.version` = 4.0.2） |
+| 认证 | Sa-Token 或 Spring Security + JWT（第 0 期第一周定稿） | Spring Security 7.0.7 |
+| 数据库版本管理 | Flyway **11.14.1** | 由 Boot 4.0.8 BOM 管理 |
+| 文件存储 | MinIO（抽象接口，可切换 OSS） | — |
+| 接口契约 | OpenAPI 3（springdoc **3.1.1**） | springdoc 3.x 对应 Boot 4 |
+| 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia | — |
+| 部署 | Nginx + 应用 + MySQL + Redis + MinIO，Docker Compose 起步 | — |
+| JDK | 21 | 现网环境 |
+
+> **注意**：Boot 4 内置 **Jackson 3**（3.1.5），与 Boot 3 时代的 Jackson 2 存在 API 差异。团队若熟悉 Jackson 2，需在培训中覆盖这一变化。
 
 ---
 
@@ -433,6 +437,8 @@ AND (
 | 打卡数据源 | 同步移动平台 | 无打卡设备，平台为权威数据源，避免重复建设 |
 | 薪资计算 | 不自研，仅做工资条查询 | 个税社保合规风险高 |
 | 交付顺序 | 路线 A：地基优先 + 试点线 | 8 域全做时返工成本远大于启动速度收益 |
+| 技术栈版本 | Boot 4.0.8 + Flowable 8.0.0 | 原定 3.3.5 已停止维护（2024-10 发布），生产系统不能用无安全补丁的框架；且 Flowable 8.0.0 的目标版本就是 Boot 4.0.2 |
+| Maven reactor | `oa/` 独立，不并入根 `java-demo` 聚合 | 根 pom 将 spring-context 锁定为 6.1.13，而 Boot 4 使用 Spring Framework 7.0.9，继承即冲突 |
 
 ---
 
@@ -456,7 +462,21 @@ AND (
 
 本仓库当前包含 4 个学习模块（`01_servlet-demo` ~ `04_spring-boot-demo`），是现有技术栈的学习与验证过程，**不参与 OA 系统构建**。
 
-OA 系统在本仓库内新增 `oa/` 聚合工程，与学习模块并存于同一 Maven 聚合下，但**互不依赖**（学习模块不引用 OA，OA 不引用学习模块）。可复用 `04_spring-boot-demo` 已验证的技术组合：Spring Boot 3.3.5 + MyBatis + MySQL + 内嵌 Tomcat。
+OA 系统在本仓库内新增 `oa/` 目录，**但它是一个独立的 Maven reactor，不并入根 `java-demo` 聚合**（根 `pom.xml` 的 `<modules>` 中不添加 `oa`）。
+
+**为什么不并入同一聚合**：根 `pom.xml` 的 `dependencyManagement` 将 `spring-context` / `spring-webmvc` 显式锁定为 **6.1.13**（供 `03_spring-demo` 使用），而 Boot 4.0.8 使用 Spring Framework **7.0.9**。由于直接声明的 dependencyManagement 条目优先于 import 进来的 BOM，一旦 `oa` 继承根 pom，整个 OA 会被拉到 Spring 6.1.13 上，与 Boot 4 冲突。独立 reactor 是唯一干净的解法。
+
+代价是构建命令需要区分：
+
+```bash
+# 学习模块
+mvn -pl 04_spring-boot-demo -am test
+
+# OA 系统（独立 reactor）
+cd oa && mvn test
+```
+
+技术组合上仍可借鉴 `04_spring-boot-demo` 已验证的部分：MyBatis 手写 SQL、MySQL 内嵌 Tomcat 启动方式。但 **Boot 版本必须升级到 4.0.8**，学习模块保持 3.3.5 不变——两者互不干扰，这也是独立的又一个好处。
 
 **需要注意的一点**：本仓库为公开可见的可能性较高，而 OA 是公司内部生产系统，代码、数据库设计、业务规则通常不适合公开。建议满足以下任一条件后再将 OA 代码推送到本仓库，否则应为 OA 单独建立**私有**仓库：
 
