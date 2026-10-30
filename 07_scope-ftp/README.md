@@ -183,6 +183,7 @@ release/server/ScopeFTP-server-xihu.zip
 说明：
 
 - `application-xihu.yml` 是私有配置，不要提交；修改后重新执行上面的命令即可，脚本不会改它。
+- 存储根以 `application-<profile>.yml` 里的 `app.storage.roots[].path` 为准；当前 `xihu` / `xiaoshan` 是 `/risen/soft`，包内 `scop-ftp.env` 不再写 `UPLOAD_STORAGE_ROOT` 覆盖它。若想让包使用包内目录，在 `scop-ftp.env` 增加 `UPLOAD_STORAGE_ROOTS=root=./data/xihu`。
 - 脚本会删除并重建 `release/server/ScopeFTP-server-xihu/`。如果包内已有 `scop-ftp.env` 等运行配置，先备份，打包后放回。
 - 验证配置已经打进 Jar：
 

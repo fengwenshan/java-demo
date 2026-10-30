@@ -51,10 +51,12 @@ for profile in "${PROFILES[@]}"; do
     profile_yaml="$PROJECT_ROOT/server/src/main/resources/application.yml"
   else
     profile_arg="--spring.profiles.active=${profile}"
-    storage_default="./data/${profile}"
     audit_default="./logs/${profile}/audit"
     log_default="./logs/${profile}"
     profile_yaml="$PROJECT_ROOT/server/src/main/resources/application-${profile}.yml"
+    # 以 profile YAML 里的 roots[].path 为准（xihu/xiaoshan 当前是 /risen/soft）。
+    storage_default="$(sed -nE 's/^[[:space:]]+path:[[:space:]]*(.*)$/\1/p' "$profile_yaml" | head -n1 || true)"
+    storage_default="${storage_default:-./data/${profile}}"
   fi
 
   # 端口默认值跟 profile YAML 保持一致，避免 env 模板写死 8080 覆盖 xihu 的 8787。
@@ -99,7 +101,9 @@ EOF
   if [[ "${profile}" == "default" ]]; then
     storage_env_line="UPLOAD_STORAGE_ROOTS=default=./data"
   else
-    storage_env_line="UPLOAD_STORAGE_ROOT=${storage_default}"
+    storage_env_line="# 存储根由 application-${profile}.yml 指定：${storage_default}
+# 如需覆盖整组根，取消下一行注释：
+# UPLOAD_STORAGE_ROOTS=root=${storage_default}"
   fi
 
   cat > "$dir/scop-ftp.env.example" <<EOF
