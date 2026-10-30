@@ -48,11 +48,20 @@ for profile in "${PROFILES[@]}"; do
     storage_default="./data"
     audit_default="./logs/audit"
     log_default="./logs"
+    profile_yaml="$PROJECT_ROOT/server/src/main/resources/application.yml"
   else
     profile_arg="--spring.profiles.active=${profile}"
     storage_default="./data/${profile}"
     audit_default="./logs/${profile}/audit"
     log_default="./logs/${profile}"
+    profile_yaml="$PROJECT_ROOT/server/src/main/resources/application-${profile}.yml"
+  fi
+
+  # 端口默认值跟 profile YAML 保持一致，避免 env 模板写死 8080 覆盖 xihu 的 8787。
+  port_default="8080"
+  if [[ -f "$profile_yaml" ]]; then
+    yaml_port="$(sed -nE 's/.*port: *\$\{SERVER_PORT:([0-9]+)\}.*/\1/p' "$profile_yaml" | head -n1 || true)"
+    if [[ -n "$yaml_port" ]]; then port_default="$yaml_port"; fi
   fi
 
   cat > "$dir/start.sh" <<EOF
@@ -102,7 +111,7 @@ EOF
 UPLOAD_APP_KEY=demo-app
 UPLOAD_APP_SECRET=请替换为至少32字节的随机密钥
 
-SERVER_PORT=8080
+SERVER_PORT=${port_default}
 SERVER_ADDRESS=0.0.0.0
 
 # 存储根（目录不存在会自动创建，需可写）
@@ -131,7 +140,7 @@ ScopeFTP-server —— ${app_name}环境（profile=${profile}）
   ./start.sh
 
 【健康检查】
-  curl http://127.0.0.1:\${SERVER_PORT:-8080}/api/health
+  curl http://127.0.0.1:\${SERVER_PORT:-${port_default}}/api/health
 
 【说明】
   - 本包已内置 application-${profile}.yml；start.sh 会自动激活 profile。
