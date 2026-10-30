@@ -1,0 +1,211 @@
+name: ScopeFTP Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '07_scope-ftp/**'
+      - '.github/workflows/scope-ftp.yml'
+  pull_request:
+    paths:
+      - '07_scope-ftp/**'
+      - '.github/workflows/scope-ftp.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_DIR: 07_scope-ftp
+  CI: true
+
+jobs:
+  server:
+    name: Server (test + jar)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MAVEN_REPO: /home/runner/.m2/repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: 07_scope-ftp/server/pom.xml
+
+      - name: Restore private profile configs from Secrets
+        env:
+          APPLICATION_DEFAULT_YML_BASE64: ${{ secrets.APPLICATION_DEFAULT_YML_BASE64 }}
+          APPLICATION_XIAOSHAN_YML_BASE64: ${{ secrets.APPLICATION_XIAOSHAN_YML_BASE64 }}
+          APPLICATION_XIHU_YML_BASE64: ${{ secrets.APPLICATION_XIHU_YML_BASE64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROJECT_DIR/server/src/main/resources"
+          for name in default xiaoshan xihu; do
+            var="APPLICATION_${name^^}_YML_BASE64"
+            val="${!var:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | base64 -d > "$PROJECT_DIR/server/src/main/resources/application-${name}.yml"
+              echo "已恢复 application-${name}.yml（来自 Secrets，不打印内容）"
+            else
+              echo "::warning::未配置 APPLICATION_${name^^}_YML_BASE64，跳过 application-${name}.yml"
+            fi
+          done
+
+      - name: Test and build server jar
+        run: |
+          mvn -B -f "$PROJECT_DIR/server/pom.xml" clean package
+          ls -lh "$PROJECT_DIR/server/target/ScopeFTP-server-"*.jar
+
+      - name: Build profile packages (only when all private configs exist)
+        run: |
+          set -euo pipefail
+          if [[ -f "$PROJECT_DIR/server/src/main/resources/application-default.yml" \
+             && -f "$PROJECT_DIR/server/src/main/resources/application-xiaoshan.yml" \
+             && -f "$PROJECT_DIR/server/src/main/resources/application-xihu.yml" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y zip
+            "$PROJECT_DIR/deploy/build-server-profiles.sh"
+          else
+            echo "::warning::私有 profile 配置不完整，跳过分环境部署包（仍会上传 Jar）"
+          fi
+
+      - name: Upload server jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScopeFTP-server-jar
+          path: 07_scope-ftp/server/target/ScopeFTP-server-*.jar
+          if-no-files-found: error
+
+      - name: Upload server profile packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScopeFTP-server-profiles
+          path: 07_scope-ftp/release/server/*.zip
+          if-no-files-found: ignore
+
+  client-macos:
+    name: Client macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            arch: x64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: 07_scope-ftp/client/pnpm-lock.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '07_scope-ftp/client/src-tauri -> target'
+
+      - name: Install frontend dependencies
+        working-directory: ${{ env.PROJECT_DIR }}/client
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare client build credentials
+        shell: bash
+        env:
+          APP_KEY: ${{ secrets.UPLOAD_CLIENT_APP_KEY }}
+          APP_SECRET: ${{ secrets.UPLOAD_CLIENT_APP_SECRET }}
+          SERVER_URL: ${{ secrets.UPLOAD_CLIENT_SERVER_URL }}
+        run: |
+          if [ -n "$APP_KEY" ]; then echo "UPLOAD_CLIENT_APP_KEY=$APP_KEY" >> "$GITHUB_ENV"; fi
+          if [ -n "$APP_SECRET" ]; then echo "UPLOAD_CLIENT_APP_SECRET=$APP_SECRET" >> "$GITHUB_ENV"; fi
+          if [ -n "$SERVER_URL" ]; then echo "UPLOAD_CLIENT_SERVER_URL=$SERVER_URL" >> "$GITHUB_ENV"; fi
+
+      - name: Build macOS DMG
+        working-directory: ${{ env.PROJECT_DIR }}/client
+        run: pnpm tauri build --target "${{ matrix.target }}" --bundles dmg --no-sign
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScopeFTP-client-macos-${{ matrix.arch }}
+          path: 07_scope-ftp/client/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  client-windows:
+    name: Client Windows (x64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: 07_scope-ftp/client/pnpm-lock.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '07_scope-ftp/client/src-tauri -> target'
+
+      - name: Install frontend dependencies
+        working-directory: ${{ env.PROJECT_DIR }}/client
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare client build credentials
+        shell: bash
+        env:
+          APP_KEY: ${{ secrets.UPLOAD_CLIENT_APP_KEY }}
+          APP_SECRET: ${{ secrets.UPLOAD_CLIENT_APP_SECRET }}
+          SERVER_URL: ${{ secrets.UPLOAD_CLIENT_SERVER_URL }}
+        run: |
+          if [ -n "$APP_KEY" ]; then echo "UPLOAD_CLIENT_APP_KEY=$APP_KEY" >> "$GITHUB_ENV"; fi
+          if [ -n "$APP_SECRET" ]; then echo "UPLOAD_CLIENT_APP_SECRET=$APP_SECRET" >> "$GITHUB_ENV"; fi
+          if [ -n "$SERVER_URL" ]; then echo "UPLOAD_CLIENT_SERVER_URL=$SERVER_URL" >> "$GITHUB_ENV"; fi
+
+      - name: Build Windows NSIS installer
+        working-directory: ${{ env.PROJECT_DIR }}/client
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScopeFTP-client-windows-x64
+          path: |
+            07_scope-ftp/client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            07_scope-ftp/client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: error

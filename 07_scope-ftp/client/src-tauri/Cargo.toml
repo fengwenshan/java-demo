@@ -1,0 +1,45 @@
+[package]
+name = "scop-ftp-client"
+version = "0.1.0"
+description = "ScopeFTP-client 桌面客户端"
+authors = ["wenshan"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+name = "scop_ftp_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# HTTP 全部走 Rust 侧；TLS 使用 rustls + ring（环境无 cmake，不能用 aws-lc-rs）
+reqwest = { version = "=0.13.5", default-features = false, features = [
+    "rustls-no-provider",
+    "stream",
+    "multipart",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", features = ["fs", "io-util", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
+url = "2"
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

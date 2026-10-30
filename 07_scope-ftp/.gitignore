@@ -1,0 +1,43 @@
+# 构建缓存（沙箱环境专用，体积大）
+.cache/
+
+# 运行期数据
+data/
+logs/
+*.log
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Java / Maven
+target/
+**/target/
+*.jar
+
+# Node / 前端
+node_modules/
+dist/
+*.local
+
+# Rust / Tauri
+**/src-tauri/target/
+**/gen/schemas/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# 部署本地配置
+deploy/.env
+deploy/.env.deploy
+deploy/data/
+deploy/logs/
+
+# 打包产物
+release/
+
+# 私有环境配置（不入库；GitHub Actions 用 Secrets 注入）
+server/src/main/resources/application-default.yml
+server/src/main/resources/application-xiaoshan.yml
+server/src/main/resources/application-xihu.yml

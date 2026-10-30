@@ -1,0 +1,30 @@
+# 测试专用 profile：每个 Spring 上下文使用 target 下独立的存储根目录，绝不污染 ./data（默认 root）
+app:
+  storage:
+    # root 下只放用户文件，内部元数据在 <root>/.upload-meta/；随机后缀避免多个 Spring 上下文串扰
+    roots:
+      - id: default
+        name: 测试根
+        path: target/test-data/root-${random.uuid}
+    # 便于测试「超过大小限制」场景，测试内只上传小文件
+    max-file-size: 1048576
+  # 测试审计日志写到 target 下随机目录，避免污染仓库 ./logs/audit
+  audit:
+    dir: target/test-audit/audit-${random.uuid}
+  security:
+    rate-limit:
+      capacity: 1000
+      refill-per-second: 1000
+    clients:
+      - app-key: demo-app
+        app-secret: demo-secret-please-change-32-bytes-min
+        name: 测试客户端
+        enabled: true
+      - app-key: second-app
+        app-secret: second-secret-please-change-32-bytes
+        name: 第二客户端
+        enabled: true
+      - app-key: disabled-app
+        app-secret: disabled-secret-please-change-32-byte
+        name: 已禁用客户端
+        enabled: false

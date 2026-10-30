@@ -1,0 +1,46 @@
+# systemd 单元文件：把服务端 Jar 作为系统服务运行（裸机 / 云服务器部署）
+#
+# 使用：
+#   sudo useradd -r -s /usr/sbin/nologin scopftp
+#   sudo mkdir -p /opt/scop-ftp/data
+#   sudo chown -R scopftp:scopftp /opt/scop-ftp
+#   sudo cp deploy/scop-ftp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now scop-ftp
+
+[Unit]
+Description=ScopeFTP-server (Spring Boot)
+Documentation=file:///opt/scop-ftp/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scopftp
+Group=scopftp
+WorkingDirectory=/opt/scop-ftp
+
+# 敏感配置放环境文件，权限 600，避免出现在 ps / systemctl show 里
+EnvironmentFile=/opt/scop-ftp/scop-ftp.env
+Environment=JAVA_OPTS=-Xms256m -Xmx512m
+# 多存储根（id=path,...，第一个为默认根）；如修改，需同步上面 ReadWritePaths
+# Environment=UPLOAD_STORAGE_ROOTS=default=/opt/scop-ftp/data
+ExecStart=/usr/bin/java $JAVA_OPTS -jar /opt/scop-ftp/app.jar
+
+SuccessExitStatus=143
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# 基本加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/scop-ftp/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,120 @@
+# =============================================================================
+# ScopeFTP-server 配置
+#
+# 生产部署注意：
+#   1. app.security.clients[].app-secret 必须替换：通过环境变量 UPLOAD_APP_SECRET
+#      或启动 Jar 时的 --app-secret 注入，不要写死在镜像/配置文件中；
+#   2. 生产环境必须经 nginx/反向代理启用 HTTPS；
+#   3. 所有配置项都可用下方 ${UPLOAD_*} 环境变量覆盖。
+# =============================================================================
+server:
+  port: ${SERVER_PORT:8080}
+  address: ${SERVER_ADDRESS:0.0.0.0}
+
+spring:
+  application:
+    name: ScopeFTP-server
+
+  servlet:
+    multipart:
+      # 单文件 200MB、单请求 210MB（契约 3.5）：仅约束「单次 multipart 上传」。
+      # 大文件请走分片上传接口（/api/files/upload/init + chunk + complete），
+      # 其分片为 application/octet-stream 裸字节，不受 multipart 限制；上限由 app.storage.max-file-size（5GiB）控制。
+      max-file-size: 200MB
+      max-request-size: 210MB
+      file-size-threshold: 0B
+      # 注意：临时目录由 AppConfig#multipartConfigElement 按 StoragePaths.tmpDir()（${java.io.tmpdir}/scop-ftp-tmp）设置，
+      # 不使用 spring.servlet.multipart.location（相对路径会被 Tomcat 解析到容器 work 目录）。
+
+  jackson:
+    default-property-inclusion: always
+    serialization:
+      write-dates-as-timestamps: false
+
+app:
+  security:
+    # 允许的时间戳偏差（毫秒），默认 ±5 分钟
+    timestamp-window-ms: ${UPLOAD_TIMESTAMP_WINDOW_MS:300000}
+    # nonce 缓存 TTL（毫秒），默认 10 分钟
+    nonce-ttl-ms: ${UPLOAD_NONCE_TTL_MS:600000}
+    # 设备绑定开关（默认关闭）：开启后已绑定 appKey 只允许绑定的 deviceId 调用文件接口。
+    # 本地开发默认 false，避免 e2e / Tauri 客户端 deviceId 不一致导致 403；生产通过
+    # UPLOAD_DEVICE_BINDING_ENABLED=true 显式开启。
+    device-binding-enabled: ${UPLOAD_DEVICE_BINDING_ENABLED:false}
+
+    # 令牌桶限流：按 appKey + 客户端 IP
+    rate-limit:
+      capacity: ${UPLOAD_RATE_LIMIT_CAPACITY:1000}
+      refill-per-second: ${UPLOAD_RATE_LIMIT_REFILL_PER_SECOND:1}
+      upload-cost: ${UPLOAD_RATE_LIMIT_UPLOAD_COST:5}
+
+    # 预配发客户端凭证（demo 默认值，生产必须替换）
+    # 启动 Jar 时可直接指定，优先级：命令行 --app-key/--app-secret > UPLOAD_* 环境变量 > 内置默认。
+    #   java -jar ScopeFTP-server.jar --app-key my-key --app-secret my-secret
+    clients:
+      - app-key: ${app-key:${UPLOAD_APP_KEY:demo-app}}
+        app-secret: ${app-secret:${UPLOAD_APP_SECRET:demo-secret-please-change-32-bytes-min}}
+        name: ${UPLOAD_APP_NAME:Tauri 桌面客户端}
+        enabled: ${UPLOAD_APP_ENABLED:true}
+
+  # 操作审计日志（客户端触发的所有 /api/** 请求，含成功/失败）。
+  # JSONL 按天分文件 audit-yyyy-MM-dd.jsonl（便于 tail/grep），同时双写 <dir>/audit.sqlite3，
+  # 供签名接口 GET /api/audit/logs 按 appKey 分页查询；目录不要放在任何 storage root 内。
+  audit:
+    enabled: ${UPLOAD_AUDIT_ENABLED:true}
+    dir: ${UPLOAD_AUDIT_DIR:./logs/audit}
+    max-body-chars: ${UPLOAD_AUDIT_MAX_BODY_CHARS:4000}
+    max-history-days: ${UPLOAD_AUDIT_MAX_HISTORY_DAYS:90}
+
+  # 远程服务器终端（契约 3.21）：高权限功能！这是护栏不是沙箱，命令以服务进程身份在本机执行。
+  # 仅建议在本机/内网使用；暴露公网、多人共用或生产服务器请设置 UPLOAD_TERMINAL_ENABLED=false。
+  # 高危命令由 TerminalGuard 拦截（返回 40000 + 中文原因），但仍不排除绕过可能，请勿对不可信用户开放。
+  terminal:
+    enabled: ${UPLOAD_TERMINAL_ENABLED:true}
+    # 单条命令超时（秒，1~60），超时杀进程树并返回 exitCode=-1
+    timeout-seconds: ${UPLOAD_TERMINAL_TIMEOUT_SECONDS:10}
+    # 输出上限（字节），超出截断并返回 truncated=true（默认 256KiB）
+    max-output-bytes: ${UPLOAD_TERMINAL_MAX_OUTPUT_BYTES:262144}
+    # 最大并发会话数（按 sessionId），超出淘汰最久未用；会话 cwd TTL 30 分钟
+    max-sessions: ${UPLOAD_TERMINAL_MAX_SESSIONS:50}
+
+  storage:
+    # 只支持多存储根（app.storage.roots[]）：
+    #   - root 下只放用户的真实文件/目录，FTP 式布局，每个根内部各有隐藏元数据目录 <root>/.upload-meta/
+    #     （metadata.sqlite3 等，目录浏览中隐藏）；
+    #   - 接口统一用 root 参数指定根 id（缺省=第一个根 defaultRootId），所有路径严格限制在该根内；
+    #   - id 必须匹配 ^[a-zA-Z0-9_-]{1,32}$ 且唯一，path 不能为空/重复/是已存在的文件；
+    #     目录不存在则创建（并创建 .upload-meta/）后做可写探测，不可用时启动快速失败；
+    #   - 第一个根为默认根；roots 为空会启动失败（不再有单根回退）。
+    # 环境变量简单形式（覆盖本列表，适合 demo/联调）：UPLOAD_STORAGE_ROOTS="work=/path/a,media=/path/b"
+    # 复杂场景（含 name、相对路径、多个根）请用本列表或外部配置文件。
+    roots:
+       - id: root
+         name: root # 当前项目文件
+         path: ${UPLOAD_STORAGE_ROOT:./data}
+       - id: download
+         name: 下载
+         path: /Users/fengwenshan/Downloads
+       - id: desktop
+         name: 桌面
+         path: /Users/fengwenshan/Desktop
+    # 单文件大小上限（默认 5GiB=5368709120）：分片上传与单次上传的元数据校验都以此为准；
+    # 注意单次 multipart 仍受上面 spring.servlet.multipart.max-request-size（210MB）限制，
+    # 超过 200MB 的文件必须走分片上传接口。
+    max-file-size: ${UPLOAD_MAX_FILE_SIZE:5368709120}
+    # 分片上传单片大小（默认 8MiB=8388608）：POST /api/files/upload/init 原样返回给客户端。
+    chunk-size: ${UPLOAD_CHUNK_SIZE:8388608}
+    # 分片上传会话保留时长（毫秒，默认 24 小时）：会话目录在 ${java.io.tmpdir}/scop-ftp-sessions/<uploadId>/，
+    # 服务启动时清理超过该时长未完成的会话（断点续传窗口）。
+    session-ttl-ms: ${UPLOAD_SESSION_TTL_MS:86400000}
+    # 在线编辑文本上限（UTF-8 字节，默认 2MiB=2097152）：超过按「文件过大，不支持在线编辑」拒绝。
+    max-edit-bytes: ${UPLOAD_MAX_EDIT_BYTES:2097152}
+    # zip 解压防 bomb 上限：entry 数 / 解压总字节 / 单 entry 字节（默认 20000 / 1GiB / 200MiB）。
+    max-extract-entries: ${UPLOAD_MAX_EXTRACT_ENTRIES:20000}
+    max-extract-total-bytes: ${UPLOAD_MAX_EXTRACT_TOTAL_BYTES:1073741824}
+    max-extract-entry-bytes: ${UPLOAD_MAX_EXTRACT_ENTRY_BYTES:209715200}
+
+logging:
+  level:
+    root: INFO
+    com.wenshan.upload: INFO
