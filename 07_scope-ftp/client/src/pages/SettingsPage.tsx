@@ -359,7 +359,6 @@ export default function SettingsPage({
           <Form.Item
             label="服务器地址"
             name="serverUrl"
-            extra="支持 Nginx 子路径转发，例如 https://example.com/scopeftp"
             rules={[
               { required: true, message: "请输入服务器地址" },
               {

@@ -227,6 +227,8 @@ https://example.com/scopeftp
 
 不要写成 `proxy_pass http://scop_ftp_backend;`（末尾没有 `/`），否则后端收到的是 `/scopeftp/api/...`，签名校验和路由都会失败。
 
+另外确认 `upstream` 端口与服务端一致：`default` profile 是 `8080`，`xihu` profile 是 `8787`。端口写错时 Nginx 会返回 502，客户端显示「服务器内部错误」。
+
 ### 2.5 一键 remote 部署（可选）
 
 在 `deploy/.env.deploy` 中配置：
