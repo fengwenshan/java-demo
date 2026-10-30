@@ -2200,6 +2200,23 @@ mod tests {
     }
 
     #[test]
+    fn request_url_keeps_reverse_proxy_prefix() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let api = Api::new(
+            reqwest::Client::new(),
+            make_server("https://example.com/scopeftp/"),
+        );
+        assert_eq!(
+            api.build_url("/api/health", "").unwrap(),
+            "https://example.com/scopeftp/api/health"
+        );
+        assert_eq!(
+            api.build_url("/api/files", "page=1&size=50").unwrap(),
+            "https://example.com/scopeftp/api/files?page=1&size=50"
+        );
+    }
+
+    #[test]
     fn audit_logs_target_encodes_query_and_omits_empty_options() {
         let base = audit_logs_target(1, 50, None, None, None, None, None, None).unwrap();
         assert_eq!(base, "/api/audit/logs?page=1&size=50");

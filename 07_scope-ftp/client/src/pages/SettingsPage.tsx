@@ -189,7 +189,7 @@ export default function SettingsPage({
 
         const isPlainHttp = /^http:\/\//i.test(saved.servers.find((item) => item.id === (isNew ? saved.activeServerId : server?.id))?.serverUrl ?? "");
         const isLocal =
-          /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(
+          /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/.*)?$/i.test(
             saved.servers.find((item) => item.id === (isNew ? saved.activeServerId : server?.id))?.serverUrl ?? "",
           );
         if (isPlainHttp && !isLocal) {
@@ -359,6 +359,7 @@ export default function SettingsPage({
           <Form.Item
             label="服务器地址"
             name="serverUrl"
+            extra="支持 Nginx 子路径转发，例如 https://example.com/scopeftp"
             rules={[
               { required: true, message: "请输入服务器地址" },
               {

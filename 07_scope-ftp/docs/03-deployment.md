@@ -196,6 +196,37 @@ sudo apt install certbot python3-certbot-nginx
 sudo certbot --nginx -d upload.example.com
 ```
 
+#### Nginx 子路径转发
+
+如果同一个域名下要挂多个项目，例如 `https://example.com/scopeftp/`，必须让 Nginx **剥掉项目前缀**，把 `/scopeftp/api/...` 转成后端认识的 `/api/...`：
+
+```nginx
+location /scopeftp/ {
+    # 注意 proxy_pass 末尾的 /，它会把 /scopeftp 前缀替换掉
+    proxy_pass http://scop_ftp_backend/;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Connection        "";
+
+    proxy_request_buffering off;
+    proxy_buffering         off;
+    proxy_read_timeout      300s;
+    proxy_send_timeout      300s;
+}
+```
+
+客户端「服务器地址」填：
+
+```text
+https://example.com/scopeftp
+```
+
+不要写成 `proxy_pass http://scop_ftp_backend;`（末尾没有 `/`），否则后端收到的是 `/scopeftp/api/...`，签名校验和路由都会失败。
+
 ### 2.5 一键 remote 部署（可选）
 
 在 `deploy/.env.deploy` 中配置：

@@ -525,7 +525,7 @@ fn normalize_credential(input: &str, label: &str, max_chars: usize) -> Result<St
 
 /// 规范化并校验服务器地址：
 /// - 保存时去掉末尾 `/`
-/// - 必须是 `http(s)://host[:port]`，不允许 path/query/fragment/用户信息
+/// - 必须是 `http(s)://host[:port][/反向代理子路径]`，不允许 query/fragment/用户信息
 /// - 允许为空（保存接口会拒绝空值；加载时用内置默认地址填充）
 pub fn normalize_server_url(input: &str) -> Result<String, String> {
     let trimmed = input.trim().trim_end_matches('/');
@@ -541,9 +541,6 @@ pub fn normalize_server_url(input: &str) -> Result<String, String> {
     }
     if parsed.host_str().is_none() {
         return Err("服务器地址缺少主机名".to_string());
-    }
-    if parsed.path() != "/" && !parsed.path().is_empty() {
-        return Err("服务器地址只应包含协议、主机和端口，例如 http://127.0.0.1:8080".to_string());
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err("服务器地址不能包含查询参数或片段".to_string());
@@ -612,8 +609,21 @@ mod tests {
     fn rejects_bad_server_url() {
         assert!(normalize_server_url("127.0.0.1:8080").is_err());
         assert!(normalize_server_url("ftp://127.0.0.1").is_err());
-        assert!(normalize_server_url("http://127.0.0.1:8080/api").is_err());
         assert!(normalize_server_url("http://127.0.0.1:8080?x=1").is_err());
+        assert!(normalize_server_url("http://127.0.0.1:8080#frag").is_err());
+        assert!(normalize_server_url("http://user:pass@127.0.0.1:8080").is_err());
+    }
+
+    #[test]
+    fn allows_reverse_proxy_path() {
+        assert_eq!(
+            normalize_server_url("https://example.com/scopeftp/").unwrap(),
+            "https://example.com/scopeftp"
+        );
+        assert_eq!(
+            normalize_server_url("https://example.com/scopeftp").unwrap(),
+            "https://example.com/scopeftp"
+        );
     }
 
     #[test]
