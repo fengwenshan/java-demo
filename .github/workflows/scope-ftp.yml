@@ -197,15 +197,35 @@ jobs:
           if [ -n "$APP_SECRET" ]; then echo "UPLOAD_CLIENT_APP_SECRET=$APP_SECRET" >> "$GITHUB_ENV"; fi
           if [ -n "$SERVER_URL" ]; then echo "UPLOAD_CLIENT_SERVER_URL=$SERVER_URL" >> "$GITHUB_ENV"; fi
 
-      - name: Build Windows NSIS installer
+      - name: Build Windows portable exe + NSIS installer
         working-directory: ${{ env.PROJECT_DIR }}/client
         run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
 
-      - name: Upload Windows installer
+      - name: Verify Windows exe outputs
+        shell: pwsh
+        working-directory: ${{ env.PROJECT_DIR }}/client
+        run: |
+          $release = "src-tauri/target"
+          $portable = Get-ChildItem $release -Recurse -Filter "ScopeFTP-client.exe" |
+            Where-Object { $_.FullName -match "[\\/]release[\\/]" } |
+            Select-Object -First 1
+          $installer = Get-ChildItem $release -Recurse -Filter "*.exe" |
+            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" } |
+            Select-Object -First 1
+          if (-not $portable) {
+            throw "未找到 Windows 可执行文件 ScopeFTP-client.exe"
+          }
+          if (-not $installer) {
+            throw "未找到 NSIS 安装包 .exe"
+          }
+          Write-Host "Portable exe: $($portable.FullName) ($($portable.Length) bytes)"
+          Write-Host "NSIS installer: $($installer.FullName) ($($installer.Length) bytes)"
+
+      - name: Upload Windows exe
         uses: actions/upload-artifact@v4
         with:
           name: ScopeFTP-client-windows-x64
           path: |
-            07_scope-ftp/client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            07_scope-ftp/client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            07_scope-ftp/client/src-tauri/target/**/release/ScopeFTP-client.exe
+            07_scope-ftp/client/src-tauri/target/**/release/bundle/nsis/*.exe
           if-no-files-found: error

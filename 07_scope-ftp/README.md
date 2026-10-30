@@ -153,7 +153,7 @@ E2E_ROOTS="work=./work,media=./media" E2E_STORAGE_ROOT=./work node scripts/e2e.m
 
 - 推送到 `main` 且改动 `07_scope-ftp/**`，或手动 `workflow_dispatch`，自动运行
 - 服务端：跑 263 个测试、打 `ScopeFTP-server` Jar；私有 profile 配置由 GitHub Secrets 注入后再生成分环境包
-- 客户端：macOS ARM64 / Intel DMG、Windows x64 NSIS 安装包（`.exe`），全部作为 Actions Artifacts 下载
+- 客户端：macOS ARM64 / Intel DMG、Windows x64 免安装 exe + NSIS 安装包（`.exe`），全部作为 Actions Artifacts 下载
 
 私有配置 `server/src/main/resources/application-{default,xiaoshan,xihu}.yml` 已加入 `.gitignore`，不会入库。首次配置见 [docs/05-ci.md](docs/05-ci.md) 的 GitHub Secrets 说明。
 

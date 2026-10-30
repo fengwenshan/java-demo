@@ -247,7 +247,7 @@ pnpm tauri dev
 cd src-tauri && cargo check && cargo test
 ```
 
-发布产物（macOS DMG / Windows NSIS `.exe` / 服务端 Jar 与分环境 zip）见 Actions 页面下载。
+发布产物（macOS DMG / Windows 免安装 exe 与 NSIS `.exe` / 服务端 Jar 与分环境 zip）见 Actions 页面下载。
 
 ### 真实服务端联调测试
 
