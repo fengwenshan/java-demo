@@ -149,13 +149,63 @@ E2E_ROOTS="work=./work,media=./media" E2E_STORAGE_ROOT=./work node scripts/e2e.m
 
 ### 3. 构建与发布（GitHub Actions）
 
-本地不再打安装包，发布交给仓库根目录的 [`.github/workflows/scope-ftp.yml`](../.github/workflows/scope-ftp.yml)：
+客户端安装包不再本地打，发布交给仓库根目录的 [`.github/workflows/scope-ftp.yml`](../.github/workflows/scope-ftp.yml)：
 
 - 推送到 `main` 且改动 `07_scope-ftp/**`，或手动 `workflow_dispatch`，自动运行
 - 服务端：跑 263 个测试、打 `ScopeFTP-server` Jar；私有 profile 配置由 GitHub Secrets 注入后再生成分环境包
 - 客户端：macOS ARM64 / Intel DMG、Windows x64 免安装 exe + NSIS 安装包（`.exe`），全部作为 Actions Artifacts 下载
 
-私有配置 `server/src/main/resources/application-{default,xiaoshan,xihu}.yml` 已加入 `.gitignore`，不会入库。首次配置见 [docs/05-ci.md](docs/05-ci.md) 的 GitHub Secrets 说明。
+私有配置 `server/src/main/resources/application-{default,xiaoshan,xihu}.yml` 已加入 `.gitignore`，不会入库。首次配置见 [docs/05-ci.md](docs/05-ci.md) 的 GitHub Secrets 说明。客户端安装包仍由 Actions 生成；服务端指定环境部署包也可以按下面第 4 步在本机打。
+
+### 4. 指定环境打包
+
+只打某一个服务端环境（例如西湖 `xihu`）：
+
+```bash
+cd 07_scope-ftp
+./deploy/build-server-profiles.sh xihu
+```
+
+脚本会先执行 `mvn -DskipTests clean package`，把当前的 `server/src/main/resources/application-xihu.yml` 打进 Jar，再生成启动脚本和配置模板。
+
+产物：
+
+```text
+release/server/ScopeFTP-server-xihu/
+  ScopeFTP-server-xihu.jar
+  start.sh
+  scop-ftp.env.example
+  README.txt
+
+release/server/ScopeFTP-server-xihu.zip
+```
+
+说明：
+
+- `application-xihu.yml` 是私有配置，不要提交；修改后重新执行上面的命令即可，脚本不会改它。
+- 脚本会删除并重建 `release/server/ScopeFTP-server-xihu/`。如果包内已有 `scop-ftp.env` 等运行配置，先备份，打包后放回。
+- 验证配置已经打进 Jar：
+
+  ```bash
+  unzip -l release/server/ScopeFTP-server-xihu/ScopeFTP-server-xihu.jar | grep application-xihu.yml
+  ```
+
+  应看到 `BOOT-INF/classes/application-xihu.yml`。
+
+如果只想替换已有包里的 Jar，并保留包内的 `scop-ftp.env`：
+
+```bash
+./scripts/mvn.sh -f server/pom.xml -DskipTests clean package
+
+OUT=release/server/ScopeFTP-server-xihu
+cp server/target/ScopeFTP-server-1.0.0.jar "$OUT/ScopeFTP-server-xihu.jar"
+
+cd release/server
+rm -f ScopeFTP-server-xihu.zip
+zip -q -r ScopeFTP-server-xihu.zip ScopeFTP-server-xihu
+```
+
+GitHub Actions 的 `ScopeFTP-server-profiles` Artifact 固定构建 `default`、`xiaoshan`、`xihu` 三个环境，需要三个 `APPLICATION_*_YML_BASE64` Secrets 齐全；如果只需要其中一个环境，优先使用本地 `build-server-profiles.sh <profile>`。
 
 ## 防伪验证怎么做的
 
