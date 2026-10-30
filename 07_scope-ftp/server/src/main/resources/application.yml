@@ -92,12 +92,6 @@ app:
        - id: root
          name: root # 当前项目文件
          path: ${UPLOAD_STORAGE_ROOT:./data}
-       - id: download
-         name: 下载
-         path: /Users/fengwenshan/Downloads
-       - id: desktop
-         name: 桌面
-         path: /Users/fengwenshan/Desktop
     # 单文件大小上限（默认 5GiB=5368709120）：分片上传与单次上传的元数据校验都以此为准；
     # 注意单次 multipart 仍受上面 spring.servlet.multipart.max-request-size（210MB）限制，
     # 超过 200MB 的文件必须走分片上传接口。
