@@ -36,3 +36,11 @@ data/
 **/application-local.properties
 **/application-local.yml
 **/application-local.yaml
+
+# ---------- 构建/部署产物（禁止提交） ----------
+*.jar
+scop-ftp.env
+
+# ---------- 本地审计与缓存（禁止提交） ----------
+.audit/
+.cache/
