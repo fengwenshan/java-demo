@@ -181,8 +181,8 @@ APP_KEY=my-key APP_SECRET=my-secret E2E_ROOTS="work=./work,media=./media" E2E_ST
 
 客户端安装包不再本地打，发布交给仓库根目录的 [`.github/workflows/scope-ftp.yml`](../.github/workflows/scope-ftp.yml)：
 
-- 推送到 `main` 且改动 `07_scope-ftp/**`，或手动 `workflow_dispatch`，自动运行并上传 Actions Artifacts
-- 推送 `v*` tag（如 `v1.0.0`）或手动发布 GitHub Release 时，会构建并自动上传服务端 Jar、分环境包和客户端安装包
+- **只有推送 `v*` tag（如 `v1.0.0`）才触发构建**；普通 `main` push、PR、手动发布 Release 都不会触发
+- tag 构建完成后自动上传 Actions Artifacts，并创建 GitHub Release 上传服务端 Jar、分环境包和客户端安装包
 - 服务端：跑 280 个测试、打 `ScopeFTP-server` Jar；私有生产配置（萧山/西湖）由 GitHub Secrets 注入后再生成分环境包（包内固定 `ftp-server/` + `ftp-server.jar`；CI 为区分环境把 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip`）；**启动时没有凭证会失败**
 - 客户端：macOS ARM64 / Intel DMG、Windows x64 免安装 exe + NSIS 安装包（`.exe`），全部作为 Actions Artifacts 下载
 

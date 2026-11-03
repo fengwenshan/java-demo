@@ -121,7 +121,7 @@ app:
 
 ### 2.1 获取构建产物
 
-不再在本地打包。推送到 `main` 或手动触发仓库根目录的 `.github/workflows/scope-ftp.yml`，在 Actions 的 **ScopeFTP-server-jar** / **ScopeFTP-server-profiles** artifact 中下载 `ScopeFTP-server` Jar 或分环境 zip。分环境包内部固定为 `ftp-server/` + `ftp-server.jar`；CI 为区分环境把 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip`。
+不再在本地打包。推送 `v*` tag 后由仓库根目录的 `.github/workflows/scope-ftp.yml` 构建，在 Actions 的 **ScopeFTP-server-jar** / **ScopeFTP-server-profiles** artifact 中下载 `ScopeFTP-server` Jar 或分环境 zip；普通 `main` push / PR / 手动发布 Release 不触发构建。分环境包内部固定为 `ftp-server/` + `ftp-server.jar`；CI 为区分环境把 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip`。
 
 ### 2.2 上传与安装
 

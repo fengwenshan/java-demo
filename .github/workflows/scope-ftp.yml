@@ -2,18 +2,7 @@ name: ScopeFTP Build
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
-    paths:
-      - '07_scope-ftp/**'
-      - '.github/workflows/scope-ftp.yml'
-  pull_request:
-    paths:
-      - '07_scope-ftp/**'
-      - '.github/workflows/scope-ftp.yml'
-  release:
-    types: [published]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -240,7 +229,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [server, client-macos, client-windows]
     runs-on: ubuntu-latest
     permissions:
@@ -258,8 +247,8 @@ jobs:
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
-          name: ${{ github.event.release.name || github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
