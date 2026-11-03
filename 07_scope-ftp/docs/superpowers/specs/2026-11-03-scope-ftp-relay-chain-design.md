@@ -274,7 +274,7 @@ B 只能从 A 访问，所以 B 收到的请求只能来自 A；C 只能从 B �
 
 **存储**：
 
-- 审计事件新增 `relayVia: string[]`（JSONL 字段 `relayVia`）。
+- 审计事件新增 `relayVia: RelayViaHop[]`（每个 hop `{appKey,name,url}`；JSONL 字段 `relayVia`）。
 - 审计 SQLite 新增可空列 `relay_via TEXT`（存 JSON 数组）；旧库通过 `ALTER TABLE ADD COLUMN` 迁移（见 6.6）。
 - 审计查询接口返回 `relayVia`；客户端日志列表/详情显示「来源」或「转发链」。
 - A 的审计没有 `relayVia`（A 是 root）；B 的记录 `[A]`；C 的记录 `[A,B]`；D 的记录 `[A,B,C]`。
@@ -381,9 +381,14 @@ pub struct ServerProfile {
   - relay：**必填**，不允许回退内置值；保存/验证时校验非空。
 - `deviceId/deviceName`：每跳独立，新建时生成 deviceId，deviceName 默认本机设备名。
 - `parentId`：relay 必填，必须指向存在且 kind 为 direct/relay 的服务器；禁止自指和环。
-- 至少保留一台 direct；relay 不能作为根。
-- 删除仅剩的最后一台 direct 时，沿用现有「至少保留一台服务器」保护，提示先添加另一台直连服务器；
-  若产品需要允许删除到空配置，需另做空态设计（见 14）。
+- relay 不能作为根；有服务器时必须至少有一台 direct（relay 的链必须能回溯到 direct）。
+- 允许没有服务器（空配置）：删除最后一台 direct 时连同其子树一起删除，客户端显示空列表/添加服务器引导；
+  不再沿用「至少保留一台服务器」保护。
+- 空配置时 `activeServerId` 为空，`ConfigView.activeServer` 为 null；`App.tsx` 不渲染浏览器，显示空态；
+  `api_from` 返回「请先添加服务器」；`save_server` 仍可新建 direct，新建后设为 active。
+- `load_or_init` 仅在配置文件不存在（首次安装）时生成默认 direct；配置文件存在但 `servers=[]` 时必须保持空，
+  `normalize()` 不得自动补默认服务器（否则删完重启又出现 A）。
+- 新建（未保存）表单没有删除按钮；已保存的服务器（direct/relay）都可以删除；删除 direct 级联子树。
 - 校验失败（父不存在/环/层级过深）时该服务器 `configured=false`，UI 提示修复，不静默改成 direct。
 - 迁移：
   - v1（单配置）→ v2 逻辑保持不变；
@@ -398,8 +403,12 @@ pub struct ServerProfile {
 
 - `resolve_chain(server_id) -> Result<Vec<ServerProfile>, String>`：沿 `parentId` 回溯、反转，校验父存在/无环/层数不超过客户端安全上限（建议 64）。
 - `save_relay_with_credentials(...)`：新建/编辑转发目标，生成/保留 id 与 deviceId，校验父存在、凭据非空，落盘 0600。
-- `delete_server(id)`：级联收集子节点，返回 `deleted_ids`；至少保留一台 direct；active 被删时回退到最近的 direct/父级。
-- `view()`：`ServerView` 增加 `kind/parentId/parentName/chainPath/rootId/rootName`；`configured` 需要整条链的地址和凭据都有效。
+- `delete_server(id)`：级联收集子节点，返回 `deleted_ids`；允许删到空配置；active 被删时回退到父级/最近的 direct，空则清空 active。
+- `view()`：`ServerView` 增加 `kind/parentId/parentName/chainPath/chainHops/rootId/rootName`；`configured` 需要整条链的地址和凭据都有效；`ConfigView.activeServer` 允许为 null。
+- `normalize()`：`servers` 为空时不再自动补默认服务器；`activeServerId` 为空时保持空；`load_or_init` 仅在配置文件不存在时创建默认 direct。
+
+`commands.rs` 的 `api_from`：没有 active 时返回「请先添加服务器」；`App.tsx` 在 `ConfigView.activeServer == null`
+时显示空态，不渲染浏览器。
 
 `ConfigView` 增加 `configVersion`。`ServerView` 的 `effectiveAppKey` 仍表示该服务器自己的 AppKey；UI 另外用
 `rootName/parentName/chainPath` 展示外层认证信息。
@@ -470,20 +479,27 @@ Ok(Api::new(state.http.clone(), chain))
 
 ```ts
 type ServerKind = "direct" | "relay";
+interface ChainHop { id: string; name: string; }
+interface RelayViaHop { appKey: string; name: string; url: string; }
 interface ServerView {
   // 现有字段
   kind: ServerKind;
   parentId: string | null;
   parentName: string | null;
   chainPath: string[];      // ["A","B","C"]
+  chainHops: ChainHop[];    // 可点击的链
   rootId: string;
   rootName: string;
 }
 interface ConfigView {
   configVersion: number;
+  activeServer: ServerView | null;   // 空配置时为 null
+  servers: ServerView[];
   // 现有字段
 }
 ```
+
+`AuditLogItem` 增加 `relayVia?: RelayViaHop[]`（服务端返回 `appKey/name/url`，客户端映射到本地服务器）。
 
 `client/src/api.ts` 新增：
 
@@ -498,7 +514,7 @@ interface ConfigView {
 - 只有**父服务器是当前 active 且连接状态为 `connected`** 时，才显示/启用「添加转发目标」入口。
 - A 未连接：A 的设置页显示「请先连接 A，连接成功后才能添加转发目标」，不渲染 B 的地址/凭据输入框。
 - B 未连接：B 下不能添加 C；选中 B 并验证成功后才出现 C 的填写入口。
-- 编辑已保存的转发目标：可以打开表单，但「验证连接」需要父链已连接；保存时提示「需重新验证」。
+- 编辑已保存的转发目标不需要父链连接，随时可以打开修改；只有「验证连接」需要父链已连接，保存后提示「需重新验证」。
 - 新建转发目标的推荐流程：
   1. 选中 A，验证连接成功；
   2. A 的设置页出现「转发目标」→「添加」；
@@ -525,6 +541,8 @@ interface ConfigView {
 - `+` 只出现在「已连接且允许添加」的父行上；点击进入新增转发目标表单。
 - 点击 relay 行：`setActiveServer(id)` → 切换 active → 右栏按 `server:root` key 重载；
   连接状态、存储根、日志、终端都切到该 target。
+- 服务器列表为空时显示空态：「还没有服务器」+「添加服务器」按钮；不渲染 A 行。空态按钮打开新增
+  direct 表单；没有 direct 时不能添加 relay。
 - 状态点仍只对 active target 显示连接状态；非 active 的 relay 行显示灰色。
 
 建议 `data-testid`：
@@ -539,12 +557,15 @@ interface ConfigView {
 
 **A（direct）的页面**：
 
+- 没有服务器时，设置页直接显示「新增 direct 服务器」表单；保存后设为 active。
 - 现有字段/验证/删除不变。
 - 连接成功后新增「转发目标（N）」卡片：
   - 列出直接子目标（B/C…）：名称、地址、状态/「点击切换」；
   - 「添加转发目标」按钮；
   - 点击某目标：`onSelectServer(target.id)`，即「A 信息里显示中转了哪些列表，点击切换到目标」。
 - 删除 A 的确认文案：「删除 A 会同时删除 N 个转发目标（B、C）的本地配置和续传状态，不会删除服务器上的文件。」
+  如果 A 是最后一台，删除后进入空配置空态（不是阻止删除）。
+- 删除按钮只对「已保存」的服务器显示；新建表单只有取消/保存，没有删除。
 
 **B/C（relay）的页面**：
 
@@ -570,16 +591,18 @@ interface ConfigView {
 
 - `ServerBrowser` 标题/面包屑显示「B（经 A 转发）」或「C（经 A → B 转发）」；存储根、路径、日志、终端
   均作用于 target。
-- 审计日志（B/C）列表/详情新增「来源」：
+- 审计日志（B/C）列表/详情新增「来源/转发链」，可点击：
   - B：`A`；
   - C：`A → B`；
   - 任意层级：`A → B → C`。
-- 日志筛选/分页沿用现有；`relayVia` 只展示，不新增筛选条件（P2 可加）。
-- 客户端自身也显示链路径，作为服务端来源审计的 UI 映证。
+  - `relayVia` 的 hop 带 `{appKey,name,url}`；客户端按 appKey（其次 url）映射到本地 `servers`，找到则渲染为
+    链接/按钮，点击调用 `onSelectServer(id)` 切换 active（与左侧列表一致）；找不到（例如别的客户端的 A）则纯文本。
+- 服务器信息/设置页也显示当前 target 的链（A → B → C），同样可点击切换；A 的「转发目标」列表已可点击。
+- 日志筛选/分页沿用现有；P2 可加按来源筛选。
 
 #### 5.4.5 非 Tauri 浏览器预览
 
-- 配置为空，沿用「请使用桌面客户端运行」提示；转发目标入口禁用。
+- 非 Tauri 环境无法读取本地配置，沿用「请使用桌面客户端运行」提示；转发目标入口禁用。
 
 ### 5.5 客户端错误提示
 
@@ -696,8 +719,10 @@ app:
 
 ### 6.6 审计与 SQLite 迁移
 
-- `AuditEvent` 增加 `List<String> relayVia`；JSONL 自动多一个字段。
-- `AuditLogItem` 增加 `List<String> relayVia`。
+- `AuditEvent` 增加 `List<RelayViaHop> relayVia`；JSONL 自动多一个字段。
+- 新增 `RelayViaHop(String appKey, String name, String url)`（`audit` 包或 `dto` 包）。
+- `AuditLogItem` 增加 `List<RelayViaHop> relayVia`。
+- `AuditStore`：`relay_via TEXT` 存 `[{appKey,name,url}]` 的 JSON；`mapItem` 解析为列表。
 - `AuditStore`：
   - `COLUMNS` 增加 `relay_via`；
   - `CREATE TABLE IF NOT EXISTS` 增加 `relay_via TEXT`；
@@ -762,8 +787,8 @@ app:
 
 ### 7.3 审计字段
 
-- JSONL：`relayVia: string[]`。
-- `GET /api/audit/logs` 返回的 `AuditLogItem.relayVia: string[]`。
+- JSONL：`relayVia: {appKey,name,url}[]`。
+- `GET /api/audit/logs` 返回的 `AuditLogItem.relayVia: {appKey,name,url}[]`。
 - 旧客户端忽略新字段；新客户端对 null/缺失做兼容。
 
 ### 7.4 Tauri 命令
@@ -802,9 +827,9 @@ app:
 | B 网络超时 | A 返回 50410 | 检查网络/超时配置 |
 | B 黑名单封了 A 的 IP | A 返回 50212 | 在 B 上执行黑名单 SQL 解封 |
 | B 的设备绑定给了别的设备 | 40300 | 在 B 上清理 device 记录/重新激活 |
-| 删除 A | B/C 本地配置和续传状态一起删 | 服务端文件不动 |
+| 删除 A | B/C 本地配置和续传状态一起删；若 A 是最后一台，客户端进入空态 | 服务端文件不动 |
 | 删除 B | C 一起删 | A 不受影响 |
-| 根服务器被删到只剩 relay | 不允许 | 至少保留一台 direct |
+| 删除最后一台 direct | 连同子树一起删，客户端显示空配置 | 允许；重启后保持空，不自动补默认服务器 |
 | A 的 key 改了但客户端没改 | A/B 都 40100 | 与现有 direct 行为一致 |
 | C 时间偏差 | C 返回 40101（经 A/B 透传） | 校时；P2 health 校准 |
 
@@ -838,7 +863,7 @@ app:
 
 - v2 → v3 迁移；v1 迁移不变；
 - 父不存在/环/自指/层级过深 → `configured=false`；
-- 级联删除、至少保留 direct、active 回退；
+- 级联删除、允许删到空配置、active 回退/清空、重启后保持空配置（normalize 不补默认）；
 - relay 的 secret 不回显到视图；secret 掩码；
 - `resolve_chain` 顺序/去重/最大深度。
 
@@ -861,7 +886,9 @@ app:
   - 左侧树缩进/「转发」Tag/切换；
   - A 信息区的转发目标列表点击切换；
   - 删除 A 的级联提示；
-  - B 的日志显示「来源 A」，C 显示「来源 A → B」；
+  - B 的日志显示「来源 A」，C 显示「来源 A → B」；来源 hop 可点击，切换到本地已配置的 A/B；
+  - 删除最后一台服务器后显示空态，重启后仍为空；添加新 direct 后恢复列表；
+  - 编辑已保存的 B/C 不要求父链连接；
   - 右栏标题「B（经 A 转发）」；
   - 非 Tauri 预览降级。
 
@@ -890,7 +917,7 @@ app:
 
 | 阶段 | 内容 | 估算 |
 | --- | --- | --- |
-| P1 | 协议/文档、服务端 `RelayForwardFilter`（流式、错误、URL 守卫、配置）、客户端 v3 配置/链签名/路由、UI 树/表单/连接前置/级联、B/C 来源审计（`relay_via` 迁移 + UI）、任意层级协议 + A→B 全功能 + A→B→C 联调 | 服务端 8–10d，Rust 6–7d，前端 4–5d，联调/测试/文档 3–4d |
+| P1 | 协议/文档、服务端 `RelayForwardFilter`（流式、错误、URL 守卫、配置）、客户端 v3 配置/链签名/路由、UI 树/表单/连接前置/级联/空配置空态、B/C 来源审计（`relay_via` 迁移 + 可点击来源链）、任意层级协议 + A→B 全功能 + A→B→C 联调 | 服务端 8–10d，Rust 6–7d，前端 4–5d，联调/测试/文档 3–4d |
 | P2 | 更深层级压测、逐跳时钟校准、可信 relay 出口 IP、密码学来源校验、审计筛选、性能/大文件优化 | 4–6d |
 
 P1 内部建议顺序：
@@ -912,16 +939,17 @@ P1 内部建议顺序：
 | AC2 | B 的表单包含目标中转服务器地址、B 的 AppKey、B 的 AppSecret、设备名称；验证通过后才能保存 |
 | AC3 | 左侧列表显示 A 下的「转发」目标；点击 B 切换到 B，右栏显示 B 的目录；存储根/终端/日志均作用于 B |
 | AC4 | A 的信息区显示已中转目标列表，点击可切换 |
-| AC5 | 在保留至少一台 direct 的前提下，删除 A 后 B/C 从客户端消失，续传状态清理；服务端文件不受影响；删除仅剩的最后一台 direct 时提示先添加直连服务器 |
+| AC5 | 删除 A 时 B/C 一起删；若 A 是最后一台 direct，删除后客户端显示空配置/添加服务器引导；重启后保持空；服务端文件不受影响 |
 | AC6 | A 的 key/secret 改错 → A/B 均失败；修正 A 后 B 自动恢复（B 配置不动） |
 | AC7 | B 的 key/secret 改错 → 提示 40110；修正 B 后恢复 |
 | AC8 | B 宕机 → 提示 50210/50410；A 不受影响 |
-| AC9 | B 的审计记录来源 A；C 的审计记录来源 A、B；任意层级记录完整链 |
+| AC9 | B 的审计记录来源 A；C 的审计记录来源 A、B；任意层级记录完整链；来源 hop 可点击切换到本地已配置的服务器 |
 | AC10 | 支持 A→B→C（以及更深）全功能：浏览/上传（含 8MB 分片断点续传）/下载/删除/重命名/拷贝移动/在线编辑/解压/搜索/终端/审计 |
 | AC11 | 链数组里不含任何 appSecret；抓包/日志看不到 B/C 的 secret |
 | AC12 | A 无法篡改 B/C 的请求内容（改动后下游验签失败） |
 | AC13 | relay 关闭时 A 返回 40320，不影响现有 direct 功能 |
 | AC14 | 旧库审计数据在升级后仍可查询；`relayVia` 为 NULL 时 UI 正常显示 |
+| AC15 | 编辑已保存的 B/C 不需要父链连接，随时可改；「验证连接」仍要求父链可用 |
 
 ## 14. 待确认/后续增强
 
@@ -931,8 +959,8 @@ P1 内部建议顺序：
 2. **时钟校准**：P1 要求 NTP；P2 可用每跳 `/health` 的 `serverTime` 计算偏移。
 3. **可信 relay 出口 IP**：P2 可为 B/C 增加「来自这些 IP 的 relay 请求不写黑名单」的配置，避免误封。
 4. **最大层级**：`app.relay.max-hops` 默认 16，可按环境调高；客户端链头大小是最终约束。
-5. **转发目标编辑的门禁**：R1 强制「添加」需要父连接成功；「编辑已保存目标」是否也强制父连接，
-   可在实现时按 UX 决定（本文建议编辑可打开、验证需父连接）。
+5. **转发目标编辑的门禁（已定）**：添加需要父连接成功；编辑已保存目标不需要父链连接，随时可改；
+   「验证连接」需要父链可用。
 6. **A 的审计是否显示转发到哪个目标**：P1 不做；P2 可在 A 的审计里加 target 摘要。
-7. **删除到空配置**：当前沿用「至少保留一台服务器」；若希望删掉最后一台 direct（连同整棵子树）后显示空态，
-   需要另行设计空配置初始化/引导，避免 `normalize()` 又自动补一台默认服务器。
+7. **删除到空配置（已定）**：允许删到空；实现需调整 `normalize()`/`load_or_init` 和前端空态，确保
+   配置文件存在但 `servers=[]` 时重启不被自动补回默认服务器。
