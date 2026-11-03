@@ -10,9 +10,11 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 /**
  * ScopeFTP-server 入口。
  *
- * <p>除了环境变量 {@code UPLOAD_APP_KEY}/{@code UPLOAD_APP_SECRET}，启动 Jar 时也可以直接传
- * {@code --app-key}/{@code --app-secret}（会映射到第一个预配发客户端的 Spring 属性）；
- * 两者都不传时使用 application.yml 内置默认值。</p>
+ * <p>环境差异由各环境文件 {@code application-<env>.yml} 决定（dev / docker /
+ * xiaoshan / xihu …），启动时用 {@code --spring.profiles.active=<env>} 选择，未指定默认 dev。
+ * 凭证可用环境变量 {@code UPLOAD_APP_KEY}/{@code UPLOAD_APP_SECRET} 注入，也可以直接传
+ * {@code --app-key}/{@code --app-secret}（会映射到第一个预配发客户端的 Spring 属性），
+ * 或在当前环境文件里配置。三者都没有时启动失败（凭证没有内置默认值）。</p>
  */
 @SpringBootApplication
 @ConfigurationPropertiesScan

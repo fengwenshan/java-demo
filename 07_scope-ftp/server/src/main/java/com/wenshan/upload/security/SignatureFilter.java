@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
  * 实际内容哈希由上传业务落盘时复算比对。这样 8MB 分片不会受 JSON 缓存上限约束。</p>
  */
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE)
+@Order(Ordered.HIGHEST_PRECEDENCE + 10)
 public class SignatureFilter extends OncePerRequestFilter {
 
     public static final String ATTR_APP_KEY = "com.wenshan.upload.signature.appKey";
@@ -63,6 +63,8 @@ public class SignatureFilter extends OncePerRequestFilter {
     private static final int MAX_CACHED_BODY_BYTES = 1_048_576;
     private static final String HEALTH_PATH = "/api/health";
     private static final String API_PREFIX = "/api/";
+    private static final String VERIFY_PATH = "/api/auth/verify";
+    private static final String ACTIVATE_PATH = "/api/auth/activate";
     private static final String FILES_PREFIX = "/api/files";
     private static final String UPLOAD_PATH = "/api/files/upload";
     private static final String UPLOAD_INIT_PATH = "/api/files/upload/init";
@@ -79,6 +81,7 @@ public class SignatureFilter extends OncePerRequestFilter {
     private final AppProperties properties;
     private final ObjectMapper objectMapper;
     private final AuditLogService auditLogService;
+    private final ClientGuardService clientGuardService;
 
     public SignatureFilter(SignatureService signatureService,
                            AuthService authService,
@@ -86,7 +89,8 @@ public class SignatureFilter extends OncePerRequestFilter {
                            RateLimitService rateLimitService,
                            AppProperties properties,
                            ObjectMapper objectMapper,
-                           AuditLogService auditLogService) {
+                           AuditLogService auditLogService,
+                           ClientGuardService clientGuardService) {
         this.signatureService = signatureService;
         this.authService = authService;
         this.nonceCache = nonceCache;
@@ -94,6 +98,7 @@ public class SignatureFilter extends OncePerRequestFilter {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.auditLogService = auditLogService;
+        this.clientGuardService = clientGuardService;
     }
 
     @Override
@@ -122,6 +127,10 @@ public class SignatureFilter extends OncePerRequestFilter {
             filterChain.doFilter(requestToUse, response);
             httpStatus = response.getStatus();
             success = httpStatus < 400;
+            if (success && VERIFY_PATH.equals(path)) {
+                // verify 成功：记录 MAC+IP 的 verify 状态，供随后 activate 的顺序校验使用
+                clientGuardService.markVerified(clientIpOf(request), clientMacOf(request), appKey, deviceId);
+            }
         } catch (RejectedException e) {
             httpStatus = e.errorCode.getHttpStatus();
             error = auditError(e.errorCode.getCode(), e.errorCode.getMessage());
@@ -250,6 +259,12 @@ public class SignatureFilter extends OncePerRequestFilter {
             throw new RejectedException(ErrorCode.RATE_LIMITED);
         }
 
+        // 8. 调用顺序：activate 前必须有同 MAC+IP 的近期 verify（仅身份强制开启时生效）
+        if (ACTIVATE_PATH.equals(path)) {
+            clientGuardService.requireVerifiedBeforeActivate(
+                    clientIpOf(request), clientMacOf(request), appKey, deviceId);
+        }
+
         requestToUse.setAttribute(ATTR_APP_KEY, appKey);
         requestToUse.setAttribute(ATTR_CLIENT_NAME, client.getName());
         if (deviceId != null && !deviceId.isBlank()) {
@@ -292,6 +307,25 @@ public class SignatureFilter extends OncePerRequestFilter {
     private static String clientIp(HttpServletRequest request) {
         String remoteAddress = request.getRemoteAddr();
         return remoteAddress == null || remoteAddress.isBlank() ? "unknown" : remoteAddress;
+    }
+
+    /** 客户端 IP（优先取 ClientGuardFilter 解析的 attribute，未经过该过滤器时回退 remoteAddr）。 */
+    private static String clientIpOf(HttpServletRequest request) {
+        Object attribute = request.getAttribute(ClientGuardService.ATTR_CLIENT_IP);
+        if (attribute instanceof String value) {
+            return value;
+        }
+        String remoteAddress = request.getRemoteAddr();
+        return remoteAddress == null || remoteAddress.isBlank() ? null : remoteAddress.trim();
+    }
+
+    /** 客户端 MAC（优先取 attribute，否则从 X-Device-Mac 头规范化）。 */
+    private static String clientMacOf(HttpServletRequest request) {
+        Object attribute = request.getAttribute(ClientGuardService.ATTR_CLIENT_MAC);
+        if (attribute instanceof String value) {
+            return value;
+        }
+        return ClientGuardService.normalizeMac(request.getHeader(ClientGuardService.HEADER_DEVICE_MAC));
     }
 
     private static boolean isFileApi(String path) {
@@ -382,12 +416,12 @@ public class SignatureFilter extends OncePerRequestFilter {
         objectMapper.writeValue(response.getOutputStream(), ApiResponse.error(errorCode));
     }
 
-    /** 过滤器内部拒绝，携带契约错误码。 */
-    private static final class RejectedException extends RuntimeException {
+    /** 过滤器内部拒绝，携带契约错误码（同包内 ClientGuardService/ClientGuardFilter 共用）。 */
+    static final class RejectedException extends RuntimeException {
 
-        private final ErrorCode errorCode;
+        final ErrorCode errorCode;
 
-        private RejectedException(ErrorCode errorCode) {
+        RejectedException(ErrorCode errorCode) {
             super(errorCode.getMessage(), null, false, false);
             this.errorCode = errorCode;
         }

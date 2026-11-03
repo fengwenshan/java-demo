@@ -20,11 +20,17 @@ Group=scopftp
 WorkingDirectory=/opt/scop-ftp
 
 # 敏感配置放环境文件，权限 600，避免出现在 ps / systemctl show 里
+# 环境文件里至少要有：SPRING_PROFILES_ACTIVE=<dev|docker|xiaoshan|xihu>、
+# UPLOAD_APP_KEY、UPLOAD_APP_SECRET（见 deploy.sh remote 生成的模板）。
+# 服务器有多个 Java 版本时，在环境文件里加 JAVA_HOME=/opt/jdk-21 指定 JDK 21。
 EnvironmentFile=/opt/scop-ftp/scop-ftp.env
 Environment=JAVA_OPTS=-Xms256m -Xmx512m
-# 多存储根（id=path,...，第一个为默认根）；如修改，需同步上面 ReadWritePaths
-# Environment=UPLOAD_STORAGE_ROOTS=default=/opt/scop-ftp/data
-ExecStart=/usr/bin/java $JAVA_OPTS -jar /opt/scop-ftp/app.jar
+# 存储根/审计/日志目录写在 jar 内 application-<env>.yml 里；
+# 若不在 /opt/scop-ftp/data 下，请同步下面 ReadWritePaths，否则服务无写权限。
+#
+# JDK 选择：环境文件里设置 JAVA_HOME 就用 $JAVA_HOME/bin/java，否则用 /usr/bin/java。
+# （$$ 是 systemd 转义，传给 /bin/sh 后才是 $；版本必须是 JDK 21+）
+ExecStart=/bin/sh -c 'JAVA_BIN="$${JAVA_HOME:+$$JAVA_HOME/bin/java}"; exec "$${JAVA_BIN:-/usr/bin/java}" $$JAVA_OPTS -jar /opt/scop-ftp/app.jar'
 
 SuccessExitStatus=143
 Restart=always

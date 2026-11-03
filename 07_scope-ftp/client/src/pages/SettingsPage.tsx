@@ -20,7 +20,6 @@ import {
   FolderOutlined,
   GlobalOutlined,
   KeyOutlined,
-  SaveOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
 
@@ -30,6 +29,7 @@ import {
   errorMessage,
   saveServer,
   verifyConnection,
+  verifyConnectionPreview,
 } from "../api";
 import type {
   ConfigView,
@@ -106,11 +106,10 @@ export default function SettingsPage({
   onRecheck,
   onDirtyChange,
 }: SettingsPageProps) {
-  const { message, modal } = AntdApp.useApp();
+  const { message } = AntdApp.useApp();
   const [form] = Form.useForm<SettingsFormValues>();
   const [saving, setSaving] = useState(false);
   const [verifying, setVerifying] = useState(false);
-  const [activating, setActivating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [dirty, setDirty] = useState(false);
 
@@ -119,10 +118,10 @@ export default function SettingsPage({
       config?.servers.find((item) => item.id === config.activeServerId) ?? null,
     [config],
   );
-  /** 验证连接 / 激活设备只能作用于当前服务器。 */
+  /** 验证连接（成功后会保存配置并激活设备）只能作用于当前服务器。 */
   const isActiveServer = !isNew && Boolean(server && server.id === activeServer?.id);
-  const verifyDisabled = browserMode || !isActiveServer;
-
+  /** 添加页可直接验证（成功后才添加）；编辑页只能验证当前服务器。 */
+  const verifyDisabled = browserMode || (!isNew && !isActiveServer);
   const initialValues = useMemo<SettingsFormValues>(
     () => ({
       name: server?.name ?? "",
@@ -207,7 +206,46 @@ export default function SettingsPage({
   );
 
   const handleVerify = useCallback(async () => {
-    // 有未保存修改时先保存，避免“填了但没保存”导致验证的是旧地址。
+    // 添加页：不落盘，先用表单里的地址/凭据做「预览验证」；成功后再自动添加服务器。
+    if (isNew) {
+      let values: SettingsFormValues;
+      try {
+        values = await form.validateFields();
+      } catch (error) {
+        if (!isFormValidationError(error)) {
+          message.error(errorMessage(error));
+        }
+        return;
+      }
+      setVerifying(true);
+      try {
+        await verifyConnectionPreview({
+          serverUrl: values.serverUrl,
+          appKey: values.appKey,
+          appSecret:
+            values.appSecret === SAVED_SECRET_MASK ? "" : values.appSecret,
+        });
+        const added = await doSave(true);
+        if (!added) return;
+        // 添加成功后自动激活设备：服务端开启设备绑定时，文件操作只认激活过的设备。
+        // 激活失败不影响已添加的服务器（例如该 AppKey 已绑定其它设备），只提示原因。
+        try {
+          await activateDevice();
+          message.success("连接验证成功，服务器已添加并激活设备");
+        } catch (error) {
+          message.warning(
+            `服务器已添加，但设备激活失败：${errorMessage(error)}`,
+          );
+        }
+      } catch (error) {
+        message.error(errorMessage(error));
+      } finally {
+        setVerifying(false);
+      }
+      return;
+    }
+
+    // 编辑页：有未保存修改时先保存，避免“填了但没保存”导致验证的是旧地址。
     if (computeDirty()) {
       const saved = await doSave(true);
       if (!saved) return;
@@ -216,56 +254,28 @@ export default function SettingsPage({
     try {
       const data = await verifyConnection();
       onVerified(data);
-      message.success("连接验证成功");
+      // 服务端开启身份强制后，activate 前必须有近期 verify（否则按乱序拉黑），
+      // 因此验证成功后自动激活设备；激活失败不影响验证结果，只提示原因。
+      try {
+        const activated = await activateDevice();
+        message.success(`连接验证成功，设备已激活：${activated.deviceName}`);
+        try {
+          const refreshed = await verifyConnection();
+          onVerified(refreshed);
+        } catch {
+          await onRecheck();
+        }
+      } catch (error) {
+        message.warning(
+          `连接验证成功，但设备激活失败：${errorMessage(error)}`,
+        );
+      }
     } catch (error) {
       message.error(errorMessage(error));
     } finally {
       setVerifying(false);
     }
-  }, [computeDirty, doSave, message, onVerified]);
-
-  const handleActivate = useCallback(async () => {
-    if (computeDirty()) {
-      const saved = await doSave(true);
-      if (!saved) return;
-    }
-    const deviceName =
-      (form.getFieldValue("deviceName") as string | undefined) ??
-      server?.deviceName ??
-      "";
-    modal.confirm({
-      title: "激活当前设备",
-      content: `将使用设备「${deviceName || "未命名设备"}」与当前 AppKey 绑定。若服务端已绑定其它设备且开启设备绑定，激活会失败。`,
-      okText: "激活",
-      cancelText: "取消",
-      onOk: async () => {
-        setActivating(true);
-        try {
-          const data = await activateDevice();
-          message.success(`设备激活成功：${data.deviceName}`);
-          try {
-            const verified = await verifyConnection();
-            onVerified(verified);
-          } catch {
-            await onRecheck();
-          }
-        } catch (error) {
-          message.error(errorMessage(error));
-        } finally {
-          setActivating(false);
-        }
-      },
-    });
-  }, [
-    computeDirty,
-    doSave,
-    form,
-    message,
-    modal,
-    onRecheck,
-    onVerified,
-    server?.deviceName,
-  ]);
+  }, [computeDirty, doSave, form, isNew, message, onRecheck, onVerified]);
 
   const handleDelete = useCallback(async () => {
     if (!server) return;
@@ -284,13 +294,10 @@ export default function SettingsPage({
   const verifyHint = browserMode
     ? "浏览器预览环境不可用"
     : isNew
-      ? "请先保存服务器后再验证连接"
+      ? "不用先添加：验证成功后会自动添加服务器并激活设备"
       : isActiveServer
-        ? ""
-        : "只能验证当前服务器，请先在左侧点击切换";
-
-  const saveDisabled = browserMode;
-
+        ? (dirty ? "会先保存修改，再验证连接并激活设备" : "")
+        : "只能验证当前服务器（验证成功才会保存修改），请先在左侧切换";
   return (
     <div className="settings-grid" data-testid="settings-grid">
       <Card
@@ -337,7 +344,6 @@ export default function SettingsPage({
           initialValues={initialValues}
           disabled={browserMode}
           onValuesChange={() => setDirty(computeDirty())}
-          onFinish={() => void doSave()}
           data-testid="settings-form"
         >
           <Form.Item
@@ -378,12 +384,15 @@ export default function SettingsPage({
           <Form.Item
             label="AppKey"
             name="appKey"
-            tooltip="留空使用客户端内置 AppKey；必须与服务端启动时的 AppKey 一致"
-            rules={[{ max: 128, message: "AppKey 最多 128 个字符" }]}
+            tooltip="必填，必须与服务端启动时指定的 AppKey 一致"
+            rules={[
+              { required: true, whitespace: true, message: "请输入 AppKey" },
+              { max: 128, message: "AppKey 最多 128 个字符" },
+            ]}
           >
             <Input
               prefix={<KeyOutlined />}
-              placeholder={server?.effectiveAppKey ?? config?.appKey ?? "留空使用内置默认"}
+              placeholder="与服务端启动时的 AppKey 一致"
               allowClear
               autoComplete="off"
               data-testid="server-app-key-input"
@@ -392,12 +401,15 @@ export default function SettingsPage({
           <Form.Item
             label="AppSecret"
             name="appSecret"
-            tooltip="留空使用内置 AppSecret；点输入框的清除按钮可恢复内置默认"
-            rules={[{ max: 256, message: "AppSecret 最多 256 个字符" }]}
+            tooltip="必填，必须与服务端启动时指定的 AppSecret 一致"
+            rules={[
+              { required: true, whitespace: true, message: "请输入 AppSecret" },
+              { max: 256, message: "AppSecret 最多 256 个字符" },
+            ]}
           >
             <Input.Password
               prefix={<SafetyCertificateOutlined />}
-              placeholder="留空使用内置默认"
+              placeholder="与服务端启动时的 AppSecret 一致"
               allowClear
               autoComplete="new-password"
               onFocus={(event) => {
@@ -424,21 +436,12 @@ export default function SettingsPage({
             />
           </Form.Item>
           <Space wrap>
-            <Button
-              type="primary"
-              htmlType="submit"
-              icon={<SaveOutlined />}
-              loading={saving}
-              disabled={saveDisabled}
-              data-testid="save-server"
-            >
-              {isNew ? "添加服务器" : "保存"}
-            </Button>
             <Tooltip title={verifyHint}>
               <span className="tooltip-button-wrap">
                 <Button
+                  type="primary"
                   icon={<ApiOutlined />}
-                  loading={verifying}
+                  loading={verifying || saving}
                   disabled={verifyDisabled}
                   onClick={() => void handleVerify()}
                   data-testid="verify-connection"
@@ -447,22 +450,7 @@ export default function SettingsPage({
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip title={verifyHint}>
-              <span className="tooltip-button-wrap">
-                <Button
-                  icon={<SafetyCertificateOutlined />}
-                  loading={activating}
-                  disabled={verifyDisabled}
-                  onClick={handleActivate}
-                >
-                  激活设备
-                </Button>
-              </span>
-            </Tooltip>
           </Space>
-          <Text type="secondary" style={{ display: "block", marginTop: 12, fontSize: 12 }}>
-            每台服务器拥有独立的 deviceId / deviceName；AppKey / AppSecret 可留空使用内置默认，也可按服务器单独覆盖。AppSecret 已保存时显示为掩码，点输入框右侧清除按钮可恢复内置默认。切换服务器后，验证连接、激活设备与所有文件操作都作用于当前服务器。
-          </Text>
         </Form>
       </Card>
 

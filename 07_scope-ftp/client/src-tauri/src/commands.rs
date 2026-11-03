@@ -1,7 +1,7 @@
 //! Tauri 命令：前端只能通过这里访问网络与本地配置。
 //!
-//! - AppKey / AppSecret 默认内置（见 [`crate::builtin`]），每台服务器可在设置中覆盖；secret 不返回前端；
-//! - 配置为多服务器 v2：每台服务器独立的 serverUrl / deviceId / deviceName / 可选凭据；
+//! - AppKey / AppSecret 必填：必须与服务端启动时指定的一致，不再回退内置默认值；secret 不返回前端；
+//! - 配置为多服务器 v2：每台服务器独立的 serverUrl / deviceId / deviceName / 凭证；
 //! - 所有网络命令都作用于当前激活的服务器；
 //! - 大文件上传自动走分片 + 断点续传（见 [`crate::uploads`]）。
 
@@ -12,7 +12,7 @@ use crate::api::{
     Api, AuditLogPage, CopyResult, ExtractResult, FileContent, FileList, FileMeta, MoveResult,
     RenameResult, SavedContent, StorageRoots, TerminalResult,
 };
-use crate::config::{self, ConfigView};
+use crate::config::{self, ConfigView, ServerProfile};
 use crate::uploads;
 use crate::AppState;
 
@@ -65,6 +65,13 @@ pub async fn save_server(
     app_key: Option<String>,
     app_secret: Option<String>,
 ) -> Result<ConfigView, String> {
+    // 必填：服务端启动时必须显式指定 AppKey/AppSecret，客户端不再回退内置默认值。
+    config::validate_required_credentials(
+        id.as_deref(),
+        app_key.as_deref(),
+        app_secret.as_deref(),
+    )?;
+
     let mut config = state
         .config
         .lock()
@@ -93,10 +100,7 @@ pub async fn save_server(
 
 /// 删除一台服务器（至少保留一台）；删除当前服务器后自动切换。
 #[tauri::command]
-pub async fn delete_server(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<ConfigView, String> {
+pub async fn delete_server(state: State<'_, AppState>, id: String) -> Result<ConfigView, String> {
     let mut config = state
         .config
         .lock()
@@ -182,6 +186,43 @@ pub fn file_info(path: String) -> Result<LocalFileInfo, String> {
 #[tauri::command]
 pub async fn verify_connection(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     api_from(&state)?.verify_connection().await
+}
+
+/// 添加服务器前的预览验证（契约 3.2）：直接用表单里的地址与凭据验证连接，
+/// **不读取、不写入已保存配置**，所以不需要先把服务器加入列表。
+///
+/// 用于「添加服务器」页的「验证连接」：验证成功后再由前端调用 `save_server` 真正添加。
+/// 这里使用临时 deviceId/deviceName；`/api/auth/verify` 不校验设备绑定，
+/// 不会影响之后保存的服务器设备身份。
+#[tauri::command]
+pub async fn verify_connection_preview(
+    state: State<'_, AppState>,
+    server_url: String,
+    app_key: Option<String>,
+    app_secret: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let profile = preview_profile(&server_url, app_key.as_deref(), app_secret.as_deref())?;
+    Api::new(state.http.clone(), profile)
+        .verify_connection()
+        .await
+}
+
+/// 构造预览验证用的临时服务器配置（不落盘）：规范化地址、裁剪凭据。
+///
+/// 空 AppKey / AppSecret 保持空串，由 [`ServerProfile`] 回退到客户端内置默认值。
+fn preview_profile(
+    server_url: &str,
+    app_key: Option<&str>,
+    app_secret: Option<&str>,
+) -> Result<ServerProfile, String> {
+    let server_url = config::normalize_server_url(server_url)?;
+    if server_url.is_empty() {
+        return Err("请输入服务器地址".to_string());
+    }
+    let mut profile = ServerProfile::new("", &server_url, "");
+    profile.app_key = app_key.unwrap_or_default().trim().to_string();
+    profile.app_secret = app_secret.unwrap_or_default().trim().to_string();
+    Ok(profile)
 }
 
 /// 设备激活/绑定（契约 3.3），使用当前服务器的 deviceId / deviceName。
@@ -306,15 +347,19 @@ pub async fn download_server_file(
         .await
 }
 
-/// 按相对路径删除服务端存储根目录中的文件（FTP 式目录浏览）。
+/// 按相对路径删除服务端存储根目录中的文件/目录（FTP 式目录浏览）。
+///
+/// `recursive=true` 时服务端一次性递归删除非空目录；缺省/false 保持旧行为
+/// （非空目录返回「目录非空，不能删除」）。
 #[tauri::command]
 pub async fn delete_server_file(
     state: State<'_, AppState>,
     path: String,
     root: Option<String>,
+    recursive: Option<bool>,
 ) -> Result<(), String> {
     api_from(&state)?
-        .delete_server_file(&path, root.as_deref())
+        .delete_server_file(&path, root.as_deref(), recursive.unwrap_or(false))
         .await
 }
 
@@ -329,7 +374,9 @@ pub async fn copy_server_path(
     path: String,
     root: Option<String>,
 ) -> Result<CopyResult, String> {
-    api_from(&state)?.copy_server_path(&path, root.as_deref()).await
+    api_from(&state)?
+        .copy_server_path(&path, root.as_deref())
+        .await
 }
 
 /// `POST /api/files/move`：移动文件/目录（task-40，可跨根）。
@@ -406,12 +453,7 @@ pub async fn terminal_exec(
     root: Option<String>,
 ) -> Result<TerminalResult, String> {
     api_from(&state)?
-        .terminal_exec(
-            &session_id,
-            &command,
-            cwd.as_deref(),
-            root.as_deref(),
-        )
+        .terminal_exec(&session_id, &command, cwd.as_deref(), root.as_deref())
         .await
 }
 
@@ -467,4 +509,37 @@ pub async fn rename_server_file(
     api_from(&state)?
         .rename_server_file(&path, &new_name, root.as_deref())
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_profile;
+
+    #[test]
+    fn preview_profile_normalizes_url_and_trims_credentials() {
+        let profile = preview_profile(
+            "  http://127.0.0.1:8080/  ",
+            Some(" key "),
+            Some(" secret "),
+        )
+        .unwrap();
+        assert_eq!(profile.server_url, "http://127.0.0.1:8080");
+        assert_eq!(profile.app_key, "key");
+        assert_eq!(profile.app_secret, "secret");
+        // 预览使用临时设备身份，不影响之后 save_server 保存的服务器。
+        assert!(!profile.device_id.is_empty());
+    }
+
+    #[test]
+    fn preview_profile_falls_back_to_builtin_credentials() {
+        let profile = preview_profile("http://127.0.0.1:8080", None, Some("   ")).unwrap();
+        assert_eq!(profile.effective_app_key(), crate::builtin::app_key());
+        assert_eq!(profile.effective_app_secret(), crate::builtin::app_secret());
+    }
+
+    #[test]
+    fn preview_profile_rejects_empty_or_invalid_url() {
+        assert!(preview_profile("   ", None, None).is_err());
+        assert!(preview_profile("ftp://127.0.0.1:8080", None, None).is_err());
+    }
 }

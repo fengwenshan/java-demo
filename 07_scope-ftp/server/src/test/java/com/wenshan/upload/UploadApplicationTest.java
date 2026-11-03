@@ -13,14 +13,14 @@ class UploadApplicationTest {
                 "--server.port=18080",
                 "--app-key", "my-key",
                 "--app-secret=my-secret",
-                "--spring.profiles.active=default"
+                "--spring.profiles.active=dev"
         });
 
         assertThat(normalized).containsExactly(
                 "--server.port=18080",
                 "--app.security.clients[0].app-key=my-key",
                 "--app.security.clients[0].app-secret=my-secret",
-                "--spring.profiles.active=default");
+                "--spring.profiles.active=dev");
     }
 
     @Test

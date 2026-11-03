@@ -527,6 +527,109 @@ public class MetaStore {
     }
 
     // ------------------------------------------------------------------
+    // 客户端身份（MAC/IP 黑名单 + verify→activate 顺序状态）
+    // ------------------------------------------------------------------
+
+    /** IP 是否在黑名单。每次实时查 SQLite，手动删行后立即生效（无需重启）。 */
+    public boolean isClientIpBlacklisted(String ip) {
+        return blacklistContains("client_blacklist_ip", "ip", ip);
+    }
+
+    /** MAC 是否在黑名单（规范化后的大写冒号格式）。实时查 SQLite，手动删行后立即生效。 */
+    public boolean isClientMacBlacklisted(String mac) {
+        return blacklistContains("client_blacklist_mac", "mac", mac);
+    }
+
+    private boolean blacklistContains(String table, String column, String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        try (Connection connection = open();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT 1 FROM " + table + " WHERE " + column + " = ? LIMIT 1")) {
+            statement.setString(1, value);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        } catch (SQLException e) {
+            throw new MetaStoreException("客户端黑名单查询失败: " + dbPath, e);
+        }
+    }
+
+    /** 把 MAC / IP 写入黑名单（空值跳过）；已存在的行保留首次封禁时间，不覆盖。 */
+    public void blacklistClient(String ip, String mac, String reason) {
+        writeLock.lock();
+        try (Connection connection = open()) {
+            blacklistInsert(connection, "client_blacklist_ip", "ip", ip, reason);
+            blacklistInsert(connection, "client_blacklist_mac", "mac", mac, reason);
+        } catch (SQLException e) {
+            throw new MetaStoreException("客户端黑名单写入失败: " + dbPath, e);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    private static void blacklistInsert(Connection connection, String table, String column,
+                                        String value, String reason) throws SQLException {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO " + table + "(" + column + ", reason, created_at) VALUES (?, ?, ?) "
+                        + "ON CONFLICT(" + column + ") DO NOTHING")) {
+            statement.setString(1, value);
+            statement.setString(2, reason);
+            statement.setLong(3, System.currentTimeMillis());
+            statement.executeUpdate();
+        }
+    }
+
+    /** 记录一次成功 verify（按 MAC+IP 覆盖时间戳、appKey、deviceId），并顺带清理 24h 前的旧状态。 */
+    public void markClientVerified(String mac, String ip, String appKey, String deviceId) {
+        writeLock.lock();
+        try (Connection connection = open();
+             PreparedStatement statement = connection.prepareStatement(
+                     "INSERT INTO client_verify_state(mac, ip, app_key, device_id, verified_at) "
+                             + "VALUES (?, ?, ?, ?, ?) ON CONFLICT(mac, ip) DO UPDATE SET "
+                             + "app_key = excluded.app_key, device_id = excluded.device_id, "
+                             + "verified_at = excluded.verified_at")) {
+            statement.setString(1, mac);
+            statement.setString(2, ip);
+            statement.setString(3, appKey);
+            statement.setString(4, deviceId);
+            statement.setLong(5, System.currentTimeMillis());
+            statement.executeUpdate();
+            try (PreparedStatement cleanup = connection.prepareStatement(
+                    "DELETE FROM client_verify_state WHERE verified_at < ?")) {
+                cleanup.setLong(1, System.currentTimeMillis() - 86_400_000L);
+                cleanup.executeUpdate();
+            }
+        } catch (SQLException e) {
+            throw new MetaStoreException("verify 状态写入失败: " + dbPath, e);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /** 该 MAC+IP 最近一次成功 verify 的时间（epoch millis），没有记录返回 empty。 */
+    public Optional<Long> clientVerifiedAt(String mac, String ip) {
+        if (mac == null || ip == null) {
+            return Optional.empty();
+        }
+        try (Connection connection = open();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT verified_at FROM client_verify_state WHERE mac = ? AND ip = ?")) {
+            statement.setString(1, mac);
+            statement.setString(2, ip);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? Optional.of(resultSet.getLong(1)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw new MetaStoreException("verify 状态查询失败: " + dbPath, e);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 初始化 / 加载 / 迁移 / SQL 工具
     // ------------------------------------------------------------------
 
@@ -555,6 +658,31 @@ public class MetaStore {
                         created_at INTEGER NOT NULL,
                         last_seen_at INTEGER,
                         PRIMARY KEY (app_key, device_id)
+                    )""");
+            // 客户端身份：IP / MAC 两张黑名单表（全局，与存储根无关；任一条命中即拦截）。
+            // 手动解封：sqlite3 metadata.sqlite3 "DELETE FROM client_blacklist_ip ..." /
+            //          "DELETE FROM client_blacklist_mac ..."（需删除命中行，无需重启服务）。
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS client_blacklist_ip (
+                        ip TEXT PRIMARY KEY,
+                        reason TEXT,
+                        created_at INTEGER NOT NULL
+                    )""");
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS client_blacklist_mac (
+                        mac TEXT PRIMARY KEY,
+                        reason TEXT,
+                        created_at INTEGER NOT NULL
+                    )""");
+            // verify→activate 顺序校验状态：按 MAC+IP 记录最近一次成功 verify 的时间。
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS client_verify_state (
+                        mac TEXT NOT NULL,
+                        ip TEXT NOT NULL,
+                        app_key TEXT,
+                        device_id TEXT,
+                        verified_at INTEGER NOT NULL,
+                        PRIMARY KEY (mac, ip)
                     )""");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_file_meta_app_created "
                     + "ON file_meta(app_key, created_at)");

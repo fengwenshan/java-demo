@@ -16,6 +16,10 @@ public enum ErrorCode {
     REQUEST_REPLAYED(40102, 401, "请求重复"),
     CLIENT_UNAUTHORIZED(40103, 401, "客户端未授权"),
     DEVICE_UNAUTHORIZED(40300, 403, "设备未授权"),
+    CLIENT_IP_BLACKLISTED(40310, 403, "IP 已被封禁"),
+    CLIENT_MAC_BLACKLISTED(40311, 403, "设备物理地址已被封禁"),
+    CLIENT_IDENTITY_MISSING(40312, 403, "缺少设备标识"),
+    CALL_ORDER_VIOLATION(40313, 403, "接口调用顺序错误"),
     NOT_FOUND(40400, 404, "资源不存在"),
     RATE_LIMITED(42900, 429, "请求过于频繁"),
     INTERNAL_ERROR(50000, 500, "服务器内部错误");

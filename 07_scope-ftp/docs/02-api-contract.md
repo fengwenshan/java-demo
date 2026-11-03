@@ -34,24 +34,27 @@
 
 ### 2.1 预配发凭证
 
-服务端 `application.yml` 中配置客户端凭证（可按环境变量覆盖）：
+服务端各环境文件 `application-<env>.yml` 的 `app.security.clients` 中配置客户端凭证（凭证可用 `UPLOAD_APP_KEY` / `UPLOAD_APP_SECRET` 注入）：
 
 ```yaml
 app:
   security:
     clients:
-      - app-key: demo-app
-        app-secret: demo-secret-please-change-32-bytes-min
+      # 没有内置默认值：必须由环境变量 UPLOAD_APP_KEY / UPLOAD_APP_SECRET
+      # 或启动参数 --app-key / --app-secret 提供，缺失则启动失败
+      - app-key: ${UPLOAD_APP_KEY:}
+        app-secret: ${UPLOAD_APP_SECRET:}
         name: Tauri 桌面客户端
         enabled: true
 ```
 
-客户端未填写 `appKey` / `appSecret` 时使用构建期内置值（`src-tauri/src/builtin.rs`，默认与本节 `demo-app` 一致，可用 `UPLOAD_CLIENT_APP_KEY` / `UPLOAD_CLIENT_APP_SECRET` 覆盖）；也可在「设置」中为每台服务器单独填写。
-设置页配置 `serverUrl`、`deviceName` 及可选的 `appKey`/`appSecret`；未填写时使用内置默认值。自定义 `appSecret` 只保存在本地 config.json（0600），**不会进入 WebView**。
+客户端身份强制校验相关开关：`app.security.client-identity-enforced`（默认 `false`，环境文件按需开启）、`app.security.verify-activate-window-ms`（默认 600000，verify 后允许 activate 的时间窗），详见 [04-security.md](04-security.md) 的 2.8。
+
+服务端启动时必须指定 `appKey` / `appSecret`（环境变量、`--app-key`/`--app-secret`，或当前环境文件），缺失会直接启动失败；客户端「设置」页也把两项改为必填，不再回退内置默认值。自定义 `appSecret` 只保存在本地 config.json（0600），**不会进入 WebView**。
 
 ### 2.2 请求头
 
-所有 `/api/**` 业务接口（`/api/health` 除外）必须携带：
+所有 `/api/**` 业务接口（`/api/health` 除外）必须携带签名头；开启客户端身份强制校验后（`app.security.client-identity-enforced: true`），**`/api/health` 也必须携带 `X-Device-Mac`**，否则 40312 并被写入黑名单：
 
 | 请求头 | 必填 | 说明 |
 | --- | --- | --- |
@@ -60,6 +63,7 @@ app:
 | `X-Nonce` | 是 | 一次性随机串，建议 UUID v4；服务端要求匹配 `^[A-Za-z0-9_-]{16,64}$`，10 分钟内不可重复 |
 | `X-Signature` | 是 | 64 位小写十六进制 HMAC-SHA256 |
 | `X-Device-Id` | 否 | 设备 UUID；文件类接口在开启设备绑定后必须携带且与绑定值一致 |
+| `X-Device-Mac` | 开启身份强制时是 | 客户端读取本机物理地址后上报，服务端规范化为 `AA:BB:CC:DD:EE:FF`；**该头不参与签名**，缺失/非法会被拉黑（40312） |
 | `X-Content-Sha256` | 上传必填 | 文件内容 SHA-256（小写 hex），同时参与签名 |
 | `Content-Type` | 是 | JSON 接口用 `application/json; charset=utf-8`；上传用 `multipart/form-data` |
 
@@ -155,6 +159,7 @@ multipart 上传时服务端不会读取整个请求体计算哈希（避免大�
 
 ### 2.6 服务端校验顺序（必须严格按此顺序，返回对应错误码）
 
+0. 开启 `client-identity-enforced` 时，先由 `ClientGuardFilter` 校验客户端身份（覆盖所有 `/api/**`，含 `/api/health`）：IP/MAC 缺失或非法 → `40312` 并写入黑名单；命中 IP 黑名单 → `40310`；命中 MAC 黑名单 → `40311`（任一条命中即拦截）
 1. 取必需请求头，缺失 → `40100`（HTTP 401）
 2. `appKey` 查找客户端配置：不存在或 `enabled=false` → `40103`（401）
 3. 解析 `X-Timestamp`：非数字 → `40100`；与本机时间偏差 > 300000ms → `40101`（401）
@@ -163,7 +168,8 @@ multipart 上传时服务端不会读取整个请求体计算哈希（避免大�
    **注意：只有在签名校验通过后才写入 nonce**，避免攻击者用无效签名污染 nonce 缓存。
 6. 文件类接口且 `deviceBindingEnabled=true`：appKey 已绑定设备且与 `X-Device-Id` 不一致 → `40300`（403）
 7. 限流（令牌桶，按 appKey + 客户端 IP）：无令牌 → `42900`（429）
-8. 进入业务处理；上传额外校验文件哈希、扩展名、大小
+8. 开启身份强制时，`/api/auth/activate` 还要求该 MAC+IP 在 `verify-activate-window-ms` 内成功 `verify` 过，否则 → `40313` 并把 MAC+IP 写入黑名单
+9. 进入业务处理；上传额外校验文件哈希、扩展名、大小
 
 ### 2.7 时间与重放
 
@@ -175,7 +181,7 @@ multipart 上传时服务端不会读取整个请求体计算哈希（避免大�
 
 ### 3.1 `GET /api/health`（无需签名）
 
-响应 `200`：
+开启客户端身份强制校验后仍需带 `X-Device-Mac`（否则 40312 并封禁）；响应仍只有状态与时间。响应 `200`：
 
 ```json
 {"code":0,"message":"ok","data":{"status":"UP","time":1760000000000},"timestamp":1760000000000}
@@ -184,6 +190,7 @@ multipart 上传时服务端不会读取整个请求体计算哈希（避免大�
 ### 3.2 `GET /api/auth/verify`（签名，无请求体）
 
 用途：客户端「验证连接」，确认地址、appKey、appSecret、设备绑定状态。
+开启 `client-identity-enforced` 时，verify 成功会按 MAC+IP 记录一次 verify 状态，供随后的 activate 顺序校验使用（文件接口不检查该状态）。
 
 响应 `data`：
 
@@ -229,6 +236,7 @@ multipart 上传时服务端不会读取整个请求体计算哈希（避免大�
 - 已绑定同一 deviceId → 更新 deviceName，返回成功
 - 已绑定其它 deviceId 且 `deviceBindingEnabled=true` → `40300`（403）
 - 已绑定其它 deviceId 且 `deviceBindingEnabled=false` → 覆盖绑定为新设备，返回成功
+- 开启 `client-identity-enforced` 时：该 MAC+IP 必须在 `verify-activate-window-ms`（默认 10 分钟）内成功调用过 `GET /api/auth/verify`，否则返回 `40313`，并把 MAC+IP 都写入黑名单（客户端应先 verify 再 activate）
 
 响应 `data`：
 
@@ -297,7 +305,7 @@ multipart 上传时服务端不会读取整个请求体计算哈希（避免大�
 限制：
 
 - **单次 multipart 请求** ≤ 200MB（`40003` / HTTP 413），单请求 ≤ 210MB（Spring `max-request-size`）；**超过 200MB 请走分片上传（3.11~3.15）**
-- 分片上传与元数据上限 `app.storage.max-file-size` 默认 **5GB**（`UPLOAD_MAX_FILE_SIZE` 可覆盖）
+- 分片上传与元数据上限 `app.storage.max-file-size` 默认 **5GB**（可在环境文件里改）
 - **不限文件类型**：任意扩展名或无扩展名文件都允许（已取消白名单与 `40002`）
 - **按当前目录原名落盘（FTP 式）**：文件写入 `dir` 指定的已存在目录（在该 `root` 根内），磁盘文件名=展示名（清洗后）；重名自动改为 `report (1).pdf`、`report (2).pdf`…（`CREATE_NEW` 原子占位，最多 1000 次，超限 `50000`）
 - `root` 必须是配置中存在的根 id，否则 `40000`；路径只在**该根内**解析，跨根 / 根外一律拒绝
@@ -373,14 +381,21 @@ Cache-Control: no-store
 - 目录/绝对路径/`..`/越界/`.upload-meta`/非法 root → `40000`（400）；文件不存在 → `40400`（404）。
 - 只读：不会修改磁盘文件。
 
-### 3.10 `DELETE /api/files?root=&path=`（签名，无请求体）
+### 3.10 `DELETE /api/files?root=&path=&recursive=`（签名，无请求体）
 
-按相对指定存储根的路径删除**普通文件或空目录**，`path` 如 `docs/report.pdf`、`docs/empty`；`root` 缺省=默认根；**只能删除该根内的内容**，跨根/根外严格拒绝。
+按相对指定存储根的路径删除**普通文件或目录**，`path` 如 `docs/report.pdf`、`docs/empty`、`docs/archive`；`root` 缺省=默认根；`recursive` 可选，默认 `false`；**只能删除该根内的内容**，跨根/根外严格拒绝。
 
-- 成功：`{"code":0,"data":{"path":"docs/report.pdf"}}`。
-- 文件：删除文件；若 SQLite 元数据中存在完全相同的 `storedPath` 记录，会一并删除该元数据记录。
-- 目录：**只允许空目录**；空目录成功、内容为空；非空目录 → `40000`（message「目录非空，不能删除」），内容全部保留；删除目录不改元数据。
-- 根目录本身、`.upload-meta`、symlink、不存在 → `40000`/`40400`；越界/绝对路径/`..`/非法 root → `40000`。
+- 成功：`{"code":0,"data":{"path":"docs/report.pdf"}}`（删除目录时返回该目录的相对路径）。
+- `recursive=false`（默认，保持旧行为）：文件可删；目录**只允许空目录**，空目录成功、内容为空；非空目录 → `40000`（message「目录非空，不能删除」），内容全部保留。
+- 文件：删除文件；若 SQLite 元数据中存在完全相同的 `storedPath` 记录，会一并删除该元数据记录（`recursive` 对文件无影响）。
+- `recursive=true` 时的目录（一次性递归删除，语义等同删除该目录及其全部内容）：
+  - 服务端自行遍历删除目录下所有文件与子目录，**不跟随 symlink**（只删除符号链接本身，不进入其指向的目标）。
+  - **元数据联动清理**：该目录下所有文件在 SQLite 元数据中的 `storedPath` 记录一并删除，删除后按文件名/列表查询不再出现这些文件。
+  - **嵌套存储根拒绝**：若该目录内包含另一个已配置的存储根（`app.storage.roots[]` 中的其他根），整体拒绝 → `40000`（message「目录包含其他存储根，不能删除」），且不删除任何内容。
+  - **部分失败**：遍历/删除中途 IO 异常 → `50000`（message「目录删除失败（部分内容可能已删除）」），此时可能已有部分内容被删除且不可恢复，客户端应刷新目录确认实际状态。
+- 根目录本身、`.upload-meta`、目标路径本身是 symlink、不存在 → `40000`/`40400`；越界/绝对路径/`..`/非法 root → `40000`。递归删除时目录**内部**的 symlink 只删除链接本身（不跟随），不视为越界。
+- `recursive` 是查询参数，参与签名（`canonicalQuery`，规则同 2.4）；仅 `recursive=true` 表示递归，缺省或 `false` 保持默认非递归行为。
+- 客户端交互：删除统一走二次确认弹窗（`modal.confirm`，删除按钮 danger，文案强调不可恢复）。目录会先调 `GET /api/files/dir`（3.8）判断是否非空：空目录提示「该目录为空，删除后不可恢复。」；非空目录强提示「目录非空（共 N 项），其中的文件和子目录会一并删除，且不可恢复」；列目录失败时保守提示「若目录非空，其中的文件和子目录会一并删除，且不可恢复」。确认后目录统一带 `recursive=true`（空目录也同样带，避免嵌套根下隐藏的 `.upload-meta` 造成「非空」误判）；删除文件不带 `recursive`。
 
 ### 3.11 `POST /api/files/upload/init`（签名，JSON）
 
@@ -606,7 +621,7 @@ Cache-Control: no-store
 }
 ```
 
-> ⚠️ 这是护栏不是沙箱：命令以服务进程用户身份执行，拦截规则只能覆盖常见高危命令/常见路径越界，无法防御刻意绕过（例如脚本内部访问根外文件）；暴露公网/多人使用时请设 `UPLOAD_TERMINAL_ENABLED=false`。
+> ⚠️ 这是护栏不是沙箱：命令以服务进程用户身份执行，拦截规则只能覆盖常见高危命令/常见路径越界，无法防御刻意绕过（例如脚本内部访问根外文件）；暴露公网/多人使用时请在对应环境文件里设 `app.terminal.enabled: false`。
 
 ### 2.7 操作审计与请求追踪
 
@@ -714,6 +729,10 @@ Query：
 | 40102 | 401 | 请求重复 | nonce 已使用 |
 | 40103 | 401 | 客户端未授权 | appKey 不存在或禁用 |
 | 40300 | 403 | 设备未授权 | 设备绑定不匹配 |
+| 40310 | 403 | IP 已被封禁 | 命中 `client_blacklist_ip`（所有 `/api/**` 生效） |
+| 40311 | 403 | 设备物理地址已被封禁 | 命中 `client_blacklist_mac`（任一条命中即拦截） |
+| 40312 | 403 | 缺少设备标识 | 开启身份强制后缺 `X-Device-Mac` 或取不到 IP（同时写入黑名单） |
+| 40313 | 403 | 接口调用顺序错误 | activate 前没有同 MAC+IP 的近期 verify（同时写入黑名单） |
 | 40400 | 404 | 资源不存在 | 文件不存在 |
 | 42900 | 429 | 请求过于频繁 | 触发限流 |
 | 50000 | 500 | 服务器内部错误 | 未捕获异常 |
@@ -760,7 +779,7 @@ Query：
 | `download_file` | `{id, targetPath}` | 保存后的绝对路径字符串（按 id） |
 | `delete_file` | `{id}` | `null` |
 | `download_server_file` | `{path, targetPath, root?}` | 保存后的绝对路径字符串（按相对 root 路径，3.9） |
-| `delete_server_file` | `{path, root?}` | `null`（按相对 root 路径，3.10） |
+| `delete_server_file` | `{path, recursive?, root?}` | `null`（按相对 root 路径，3.10）；`recursive=true` 用于删除前已确认的非空目录（客户端先列目录判断并强提示） |
 | `list_server_dir` | `{path?, root?}` | 3.8 的 data（`path` 省略/空=根目录） |
 | `search_server_files` | `{keyword, limit?, root?}` | 3.16 的 data（`limit` 默认 100；`root` 缺省=默认根） |
 | `rename_server_file` | `{path, newName, root?}` | 3.18 的 data；`newName` 仅单段名字，冲突/非法名返回中文错误 |
@@ -794,6 +813,7 @@ Query：
 - 上传：先流式计算 SHA-256（第一遍），再以流式 body 上传（第二遍），边读边发进度事件
 - 下载：流式写入目标文件，同时计算 SHA-256，与响应头 `X-Content-Sha256` 不一致则删除文件并报错
 - 每次请求生成新的 `X-Nonce`（UUID）与当前时间戳
+- 启动时读取本机物理地址（macOS 优先 `en0`/`en1`，Linux 读 `/sys/class/net`，Windows 用 `getmac`），**每个请求（含 `/api/health`）都带 `X-Device-Mac`**；读不到 MAC 时本地直接报错、不发出请求（避免被服务端当成缺身份客户端封禁）
 - 签名函数与第 2 节逐字一致，必须提供 Rust 单元测试覆盖第 2.3 节两个测试向量
 - 断点续传状态存本地 `uploads.json`（与配置同目录，0600）：记录 serverId/dir/name/size/mtime/sha256/uploadId，不含文件内容与密钥；启动清理 >24h 记录
 - 普通 JSON/DELETE 请求对 429/网络/5xx 做最多 3 次退避重试；分片 PUT 每片失败重试 3 次，`complete` 缺片 `40000` 时保留状态可续传
@@ -807,9 +827,9 @@ Query：
 
 在线编辑弹窗内置 **Monaco（VS Code 内核）**：主题 `vs`、无 minimap、自动换行、自动布局；按扩展名自动识别语言（txt/json/js/ts/html/css/java/py/xml/yaml/sql/sh/md/...→plaintext），顶部「语言」下拉可手动切换（30 种中文标签）并立即高亮；顶部「Tab」下拉可选 2/4 空格（默认 4，`insertSpaces=true`、关闭自动检测缩进，选择持久化到 localStorage 并即时生效）；⌘S/Ctrl+S 保存，未关闭需确认，保存失败保留内容。
 
-**Finder 式列表**：列 `名称` / `修改日期`（`YYYY年M月D日 HH:mm`）/ `大小`（目录 `--`）/ `种类`（文件夹/PDF 文稿/PPT 演示文稿/Word 文稿/Excel 表格/文本文稿/图片/压缩包/音频/视频/文件）；单击选中（Finder 蓝），↑/↓（Home/End）移动选中，Enter 或对选中行再次单击进入行内重命名，双击文件用系统默认应用打开、双击文件夹进入；无「操作」列，下载/删除/编辑/解压/终端/拷贝/移动走**行右键菜单**（在线编辑 / 解压仅 .zip / 在此打开终端 / 拷贝 / 移动到… / 下载 / 重命名 / 删除）；「移动到…」弹窗可切换存储根并浏览目录选择目标（重命名直接在该行名称单元格**内联编辑**：自动聚焦并全选原名，回车/失焦保存、Esc 取消，仅单段名字；删除目录仅限空目录，非空由服务端 40000 并 toast）；`Table`（名称、类型、大小、修改时间、操作[下载/删除]，目录行点击进入）；文件行下载走 3.9、删除走 3.10（`Popconfirm`）；空目录/truncated 提示
+**Finder 式列表**：列 `名称` / `修改日期`（`YYYY年M月D日 HH:mm`）/ `大小`（目录 `--`）/ `种类`（文件夹/PDF 文稿/PPT 演示文稿/Word 文稿/Excel 表格/文本文稿/图片/压缩包/音频/视频/文件）；单击选中（Finder 蓝），↑/↓（Home/End）移动选中，Enter 或对选中行再次单击进入行内重命名，双击文件用系统默认应用打开、双击文件夹进入；无「操作」列，下载/删除/编辑/解压/终端/拷贝/移动走**行右键菜单**（在线编辑 / 解压仅 .zip / 在此打开终端 / 拷贝 / 移动到… / 下载 / 重命名 / 删除）；「移动到…」弹窗可切换存储根并浏览目录选择目标（重命名直接在该行名称单元格**内联编辑**：自动聚焦并全选原名，回车/失焦保存、Esc 取消，仅单段名字；删除目录前先 `GET /api/files/dir` 判断是否为空：空目录普通确认，非空目录强提示「目录非空（共 N 项），其中的文件和子目录会一并删除，且不可恢复」，确认后目录统一带 `recursive=true` 调 3.10 递归删除（空目录同样带，避免嵌套根下隐藏 `.upload-meta` 造成非空误判）；文件删除不带 `recursive`）；`Table`（名称、类型、大小、修改时间、操作[下载/删除]，目录行点击进入）；文件行下载走 3.9、删除走 3.10（删除均为 `modal.confirm` 二次确认，不可恢复）；空目录/truncated 提示
   3. **拖拽上传（核心）**：监听 Tauri 原生拖放 `getCurrentWebview().onDragDropEvent`——`enter/over` 显示整块遮罩「松开上传到 <当前目录>」，`drop` 后过滤目录/空文件，按当前 `path` 串行上传（`upload_file` 的 `dir`），复用 `upload-progress` 显示进度，完成后汇总提示并刷新；上传中禁用重复拖入。**>32MB 自动走分片上传（3.11~3.15），断点续传状态存本地 `uploads.json`（serverId/dir/name/size/mtime → uploadId）**
-  4. **设置/服务器详情**（从左侧服务器铅笔进入，点左侧服务器返回目录）：`Form`（服务器名称、服务器地址、AppKey、AppSecret、设备名称），AppKey/AppSecret 可留空使用内置默认值；显示 deviceId、绑定状态、服务端限制（最大文件大小）、服务端存储目录，「保存」「验证连接」「激活设备」「删除服务器」（>1 台时）按钮；离开时保留未保存确认；长文本必须换行/省略，不允许溢出卡片或产生页面横向滚动条
+  4. **设置/服务器详情**（从左侧服务器铅笔进入，点左侧服务器返回目录）：`Form`（服务器名称、服务器地址、AppKey、AppSecret、设备名称），AppKey/AppSecret 必填（必须与服务端启动时一致，留空保存/验证会被拒绝）；显示 deviceId、绑定状态、服务端限制（最大文件大小）、服务端存储目录，设置页只提供「验证连接」（以及 >1 台时的「删除服务器」），**不再有单独的保存/激活设备按钮**；「验证连接」= 验证 → 保存 → 激活设备：添加页先用当前表单值直接验证（不落盘），成功后才添加服务器并激活设备（激活失败保留服务器并提示，验证失败不保存不添加）；编辑页先保存未保存修改，再验证并激活当前设备（非当前服务器需先在左侧切换，验证成功才保存修改）；激活前客户端会先调 verify（服务端要求 verify→activate 顺序，乱序会被 40313 封禁）；离开时保留未保存确认；长文本必须换行/省略，不允许溢出卡片或产生页面横向滚动条
 - 未配置时：右侧显示 `Empty` + 去设置引导；首次启动自动使用内置默认服务器地址 `http://127.0.0.1:8080`
 - 非 Tauri 环境（浏览器打开 vite dev）：捕获 invoke 异常，显示 `Alert`「请使用桌面客户端运行」
 - 不引入多余 UI 框架；图标用 `@ant-design/icons`
@@ -818,18 +838,18 @@ Query：
 
 - 包名 `com.wenshan.upload`，模块目录 `server/`
 - 统一响应 `ApiResponse<T>`，异常处理 `@RestControllerAdvice`
-- 过滤器 `SignatureFilter`（`OncePerRequestFilter`，注册顺序最高），
+- 过滤器 `ClientGuardFilter`（客户端身份/黑名单，`Ordered.HIGHEST_PRECEDENCE`）→ `SignatureFilter`（签名校验，`HIGHEST_PRECEDENCE + 10`），
   JSON 请求体用自定义 `CachedBodyHttpServletRequest` 缓存后计算哈希并向下传递；
   multipart 请求**不得**缓存整个 body
 - 非 UTF-8 请求体 → `40000`
-- `/api/health` 与 `OPTIONS` 跳过签名
+- `/api/health` 与 `OPTIONS` 跳过签名；开启客户端身份强制后，两者仍受 `ClientGuardFilter` 的 MAC/IP 检查约束
 - **SQLite 元数据**：文件/设备元数据持久化在 `<root>/.upload-meta/metadata.sqlite3`（旧 `files.json`/`devices.json` 自动迁移备份），
   启动时加载到内存索引，变更在写锁内以短事务同步落 SQLite，成功后替换内存快照
-- **存储根唯一配置**：`app.storage.roots[]`（每项 `id/name/path`，第一个为默认根；yaml 默认一个 `default` 根指向 `./data`）。启动时解析为绝对路径、
+- **存储根唯一配置**：`app.storage.roots[]`（每项 `id/name/path`，第一个为默认根；写在各环境文件 `application-<env>.yml` 里，如 dev 是 `./data`、docker 是 `/app/data`）。启动时解析为绝对路径、
   创建目录并校验可写；**根目录只放用户文件/目录**，内部元数据在 `<root>/.upload-meta/`，multipart 临时文件在
   `${java.io.tmpdir}/scop-ftp-tmp`；旧单根 `files/meta/tmp` 布局不再自动迁移（需手动整理）。
   **所有文件读写删除都限制在 root 内**：拒绝绝对路径、`..` 段、以及指向 root 外的符号链接（normalize + `toRealPath` 校验），并拒绝内部目录 `.upload-meta`
 - 客户端只能指定**相对 root 且已存在**的上传目录（`dir`）与相对 root 的下载/删除路径，不能指定 root 外路径；`verify` 只回显只读的 `storageDir`
-- 配置项使用 `@ConfigurationProperties(prefix = "app")`，并允许环境变量覆盖（如 `UPLOAD_APP_SECRET`）
-- `application.yml` 默认包含 demo 客户端（`demo-app` / `demo-secret-please-change-32-bytes-min`），并在注释中提示生产必须替换
+- 配置项使用 `@ConfigurationProperties(prefix = "app")`；只有客户端凭证支持环境变量注入（`UPLOAD_APP_KEY` / `UPLOAD_APP_SECRET`），其余配置都在环境文件里
+- 凭证没有内置默认值：`app.security.clients[].appKey/appSecret` 必须由 `UPLOAD_APP_KEY` / `UPLOAD_APP_SECRET`、启动参数 `--app-key`/`--app-secret` 或当前环境文件提供；缺失时启动阶段快速失败（`AppProperties#afterPropertiesSet` 校验非空、唯一、至少一个启用客户端）
 - 测试：JUnit 5 + `@SpringBootTest` + MockMvc，覆盖签名测试向量、过期、重放、错误签名、上传-列表-下载-删除全链路

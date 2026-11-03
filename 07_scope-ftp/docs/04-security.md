@@ -15,6 +15,7 @@
 | T6 | 路径穿越、恶意文件名、越界读写 | 存储根目录唯一配置 + 严格目录约束（拒绝绝对路径/`..`/symlink 逃逸）；原始文件名只作元数据展示并清洗；磁盘文件名用 UUID | `StoragePaths` + `FileStorageService` |
 | T7 | 上传可执行文件后诱导下载 | 不限制上传类型（业务要求），但下载固定 `Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`，只存储不执行；生产建议接入文件内容扫描 | `FileStorageService` + Controller |
 | T8 | 时钟漂移导致合法请求被拒 | `verify` 返回 `serverTime`，客户端可提示校准 | `/api/auth/verify` |
+| T9 | 伪造客户端身份、跳过验证直接调用 activate、或换机绕过设备绑定 | 所有 `/api/**`（含 health）强制 `X-Device-Mac`；`client_blacklist_ip` / `client_blacklist_mac` 两张表任一命中即拦截；`activate` 前必须有同 MAC+IP 的近期 `verify`，否则按乱序封禁 | `ClientGuardFilter` + `ClientGuardService` |
 
 ## 2. 已实现的防护细节
 
@@ -28,7 +29,7 @@ canonical   = v1 \n appKey \n timestamp \n nonce \n METHOD \n path \n canonicalQ
 - 服务端用**常量时间比较**（`MessageDigest.isEqual`），避免时序侧信道
 - appSecret 只保存在服务端配置与客户端 Rust 侧，不进 WebView、不进日志
 - nonce 只在签名校验通过后才写入缓存，避免攻击者用无效签名污染缓存
-- 校验顺序固定：appKey → 时间戳 → 签名 → nonce → 设备绑定 → 限流
+- 校验顺序固定（开启身份强制时）：客户端身份（IP/MAC 黑名单，见 2.8）→ appKey → 时间戳 → 签名 → nonce → 设备绑定 → 限流 → activate 顺序校验
 
 ### 2.2 防重放
 
@@ -45,9 +46,10 @@ canonical   = v1 \n appKey \n timestamp \n nonce \n METHOD \n path \n canonicalQ
 ### 2.4 设备绑定
 
 - 客户端首次启动生成 UUID 设备号并持久化
-- 「设置 → 激活设备」把 appKey 与 deviceId 绑定（服务端 `device_binding` 表）
+- 设置页「验证连接」成功后自动把 appKey 与 deviceId 绑定（服务端 `device_binding` 表；不再单独提供「激活设备」按钮）
 - 开启 `DEVICE_BINDING_ENABLED=true` 后，文件类接口要求 `X-Device-Id` 与绑定值一致，否则 403
 - 处理换机：服务端清除绑定记录后重新激活，或临时关闭绑定开关
+- 设备绑定只作用于 `/api/files/**`；需要“整台机器级”拦截时开启 2.8 的客户端身份强制校验（MAC/IP 黑名单，覆盖全部 `/api/**`）
 
 ### 2.5 限流
 
@@ -60,30 +62,60 @@ canonical   = v1 \n appKey \n timestamp \n nonce \n METHOD \n path \n canonicalQ
 - 磁盘文件名：直接使用清洗后的原始文件名（FTP 式，按当前浏览目录落盘），重名自动加 ` (1)` 序号；原始展示名另存元数据
 - 文件名清洗：去除 `/`、`\`、控制字符，长度截断 255
 - **不限制扩展名**：任意类型（含无扩展名）都可上传；服务端只存储不执行，下载固定为附件
-- 单次 multipart 请求 200MB/210MB（Nginx 同步 210m）；分片上传文件上限默认 5GB（`UPLOAD_MAX_FILE_SIZE`），每片 ≤ 8MB
+- 单次 multipart 请求 200MB/210MB（Nginx 同步 210m）；分片上传文件上限默认 5GB（`app.storage.max-file-size`），每片 ≤ 8MB
 - 分片会话放系统临时目录：`uploadId` 强制 UUID、会话元数据校验 size/sha256、分片落盘前复算 SHA-256、complete 前校验齐全与总大小，成功/失败/取消后清理，启动清理 24h 过期会话
 - 下载固定 `Content-Disposition: attachment`，避免浏览器内联执行
 
 ### 2.7 存储根目录约束（只能对该目录操作）
 
-- 配置项 `app.storage.roots[]`（每项 `{id,name,path}`，第一个为默认根；yaml 默认一个 `default` 根指向 `./data`，也可用 `UPLOAD_STORAGE_ROOTS` 覆盖），启动时逐个解析成绝对路径、创建并校验可写；`roots` 为空时启动失败（不再有单根回退）
+- 配置项 `app.storage.roots[]`（每项 `{id,name,path}`，第一个为默认根；写在各环境文件 `application-<env>.yml` 里，如 dev 是 `./data`），启动时逐个解析成绝对路径、创建并校验可写；`roots` 为空时启动失败（不再有单根回退）
 - 用户文件直接位于 `<root>` 下（可分子目录），内部元数据在 `<root>/.upload-meta/`，临时文件在系统临时目录；客户端只能指定相对 root 的已存在目录/路径
 - 所有读写删除都会做路径校验：只接受相对路径，拒绝绝对路径和 `..` 段，解析后必须落在 root 内，并拒绝内部目录 `.upload-meta`；
   对已存在路径用 `toRealPath` 校验，父目录是符号链接且真实路径指向 root 外时同样拒绝
 - 元数据文件被人工篡改（例如把 `storedPath` 改成 `../../etc/passwd`）也只会得到明确错误，不会读到/删到目录外文件
 - 目录浏览（契约 3.8）与递归搜索（契约 3.16）受根目录约束：只能列出/搜索 `<root>` 下的条目，隐藏 `.upload-meta`，跳过符号链接；搜索限制扫描 50000 条目/深度 20，避免超大目录树拖垮服务
 - 分片上传（契约 3.11~3.15）路径规则同单文件上传：`dir` 必须是 root 内已存在目录，拒绝越界/内部目录；`uploadId` 仅接受 UUID，避免会话目录路径注入
-- **远程终端**：签名接口在服务器上执行命令；**目录范围**：默认 cwd=第一个存储根，`root` 决定首次会话根，`cd`/路径参数/重定向必须落在 `app.storage.roots` 内（TerminalScope + TerminalPathGuard 做 normalize+realpath 校验，拒绝 `..`、symlink、`/etc`、`/tmp`、`~` 等），越界返回中文原因且不启动进程；`TerminalGuard` 集中规则拦截常见高危操作（递归删除根/家目录、磁盘格式化、关机重启、提权、fork bomb、防火墙/内核/挂载、`curl | sh` 等），命中返回中文原因且不启动进程；会话 30 分钟 TTL、最多 50 个、按 appKey 隔离；超时杀进程树、输出限长；**护栏不是沙箱，无法防御刻意绕过**（如脚本内部访问根外文件），公网/多人环境应设 `UPLOAD_TERMINAL_ENABLED=false`
+- **远程终端**：签名接口在服务器上执行命令；**目录范围**：默认 cwd=第一个存储根，`root` 决定首次会话根，`cd`/路径参数/重定向必须落在 `app.storage.roots` 内（TerminalScope + TerminalPathGuard 做 normalize+realpath 校验，拒绝 `..`、symlink、`/etc`、`/tmp`、`~` 等），越界返回中文原因且不启动进程；`TerminalGuard` 集中规则拦截常见高危操作（递归删除根/家目录、磁盘格式化、关机重启、提权、fork bomb、防火墙/内核/挂载、`curl | sh` 等），命中返回中文原因且不启动进程；会话 30 分钟 TTL、最多 50 个、按 appKey 隔离；超时杀进程树、输出限长；**护栏不是沙箱，无法防御刻意绕过**（如脚本内部访问根外文件），公网/多人环境应在对应环境文件里设 `app.terminal.enabled: false`
 - **在线编辑**：读接口严格 UTF-8、上限 2 MiB；保存仅覆盖已存在普通文件，可选 `expectedSha256` 并发校验（不一致不写），同目录临时文件 + `ATOMIC_MOVE` 原子覆盖，元数据 sha/size 同步；路径同样受 root 隔离约束
 - **zip 解压**：拒绝绝对路径/`..`/反斜杠/NUL/`.upload-meta`/symlink entry/加密包/同名重复 entry；entry 数、总字节、单 entry 字节上限防 zip bomb；任意失败回滚本次创建的目录；目标目录重名追加序号、不覆盖；zip64 暂不支持
-- **重命名/删除目录**：`rename` 的 `newName` 限定单段名字，拒绝路径分隔符/控制字符/`.`/`..`/内部目录；目标已存在（含仅大小写差异）不覆盖；目录重命名同样走 `StoragePaths` 校验且拒绝搬动包含其他已配置根的目录；删除目录仅允许空目录，非空目录 40000 且内容保留；元数据与磁盘改名后同步，写元数据失败会尝试回滚磁盘改名
+- **重命名/删除目录**：`rename` 的 `newName` 限定单段名字，拒绝路径分隔符/控制字符/`.`/`..`/内部目录；目标已存在（含仅大小写差异）不覆盖；目录重命名同样走 `StoragePaths` 校验且拒绝搬动包含其他已配置根的目录。删除目录支持两种模式：默认（`recursive` 缺省或 `false`）仅允许空目录，非空目录 40000 且内容保留；`recursive=true` 时服务端在 `StoragePaths` 校验后一次性递归删除目录及内容，**不跟随 symlink**（只删除符号链接本身，不进入链接目标），并同步清理该目录下文件的元数据；若目录树内包含另一个已配置的存储根则整体拒绝（40000，不删除任何内容）；删除中途 IO 失败返回 50000「目录删除失败（部分内容可能已删除）」，此时可能已有部分内容被删且不可恢复。客户端删除目录前先列目录判断是否非空，非空时强提示「目录非空（共 N 项），其中的文件和子目录会一并删除，且不可恢复」并二次确认，空目录与文件则走普通确认（同样提示不可恢复）；确认后目录统一带 `recursive=true`（空目录也带，避免嵌套根下隐藏的 `.upload-meta` 造成非空误判）；元数据与磁盘改名后同步，写元数据失败会尝试回滚磁盘改名
 - **多存储根隔离**：每个 root 有独立 `StoragePaths`，路径解析限定在请求指定的 root 内；跨根路径（`../其他根`、绝对路径、symlink→其他根）在解析阶段拒绝（40000），不会读到/删到该根外文件；按文件 id 删除时使用记录里的 `rootId`，`rootId` 未配置或记录与根不一致返回 50000 并拒绝删除；`.upload-meta` 任何层级都隐藏/拒绝（防嵌套根元数据被上层根访问）
 - 客户端断点续传状态存本地 `uploads.json`（0600，仅路径/大小/mtime/sha256/uploadId，不含文件内容与密钥），启动清理超过 24h 的记录；服务端会话失效时客户端会重新 init 全量重传
-- 路径下载/删除接口（契约 3.9/3.10）同样只接受 root 内相对路径且拒绝 `.upload-meta`；删除只删普通文件，不删目录
-- **已知边界**：存储根目录是共享文件系统视图，路径式下载/删除不按 appKey 隔离（多租户需另做设计）；能通过签名的客户端可删除 root 内任意文件，生产环境应配合设备绑定、最小权限账号与审计
+- 路径下载/删除接口（契约 3.9/3.10）同样只接受 root 内相对路径且拒绝 `.upload-meta`；删除支持文件与目录：文件直接删，目录默认仅限空目录，非空目录必须显式 `recursive=true` 才递归删除（仍限定在该 root 的真实路径内，不跟随 symlink）
+- **已知边界**：存储根目录是共享文件系统视图，路径式下载/删除不按 appKey 隔离（多租户需另做设计）；能通过签名的客户端可删除 root 内任意文件与目录（含用 `recursive=true` 递归删除非空目录，不可恢复），生产环境应配合设备绑定、最小权限账号与审计
 - 生产建议：root 指向独立数据盘，权限只给运行用户，`data/` 不与其他服务共用
 
-### 2.8 部署层
+### 2.8 客户端身份强制校验（MAC/IP 黑名单 + 调用顺序）
+
+默认关闭（`application.yml` 的 `app.security.client-identity-enforced: false`）；`application-dev.yml`、萧山/西湖生产环境文件已开启。
+
+- **身份来源**：`IP = request.getRemoteAddr()`；`MAC = X-Device-Mac`（桌面客户端启动时读取本机网卡，每个请求都带，服务端规范化为 `AA:BB:CC:DD:EE:FF`）。
+  HTTP 层拿不到客户端 MAC，只能由客户端自报；当前不解析 `X-Forwarded-For`，Nginx 反代后所有客户端会共享代理 IP。
+- **所有 `/api/**`（含 `/api/health`）** 都先经过 `ClientGuardFilter`（最高优先级，在签名过滤器与 health 跳过之前）：
+  - IP 或 MAC 缺失/非法 → `40312`（缺少设备标识），并把能拿到的 IP/MAC 写入黑名单；
+  - 命中 `client_blacklist_ip` → `40310`；命中 `client_blacklist_mac` → `40311`（**任一条命中即拦截**）；
+  - 黑名单**实时查 SQLite**，手动删行后立即生效，不需要重启服务。
+- **调用顺序**：`activate` 必须在该 MAC+IP 最近一次成功 `verify` 之后 `app.security.verify-activate-window-ms`（默认 10 分钟）内调用；否则视为乱序 → `40313`，并把 MAC 和 IP 都写入黑名单。文件/终端等其它接口不检查顺序。
+- **两张黑名单表 + verify 状态表**（默认存储根 `<root>/.upload-meta/metadata.sqlite3`，全局生效）：
+  - `client_blacklist_ip(ip PRIMARY KEY, reason, created_at)`
+  - `client_blacklist_mac(mac PRIMARY KEY, reason, created_at)`
+  - `client_verify_state(mac, ip, app_key, device_id, verified_at, PRIMARY KEY(mac, ip))`
+- **手动解封**（只删一张表时，另一条命中仍会拦截，所以要把命中的行都删掉）：
+
+```bash
+DB=<默认存储根>/.upload-meta/metadata.sqlite3
+sqlite3 "$DB" "DELETE FROM client_blacklist_ip  WHERE ip='1.2.3.4';"
+sqlite3 "$DB" "DELETE FROM client_blacklist_mac WHERE mac='AA:BB:CC:DD:EE:FF';"
+```
+
+- **部署注意**：
+  - 健康检查/探活/监控请求也必须带 `X-Device-Mac`（`deploy/docker-compose.yml` 的 healthcheck 已带固定值），否则会被当成缺身份客户端封禁；封禁后 health 也返回 403。
+  - 旧版客户端（不带 MAC）在开启开关后第一条请求就会被封；请先发布新版客户端，再重启服务端。
+  - 测试 profile 显式关闭（历史单测不带 MAC）；黑名单/顺序校验由 `ClientIdentityGuardIntegrationTest` 单独开启验证。
+  - e2e 统一使用固定 `02:00:00:00:00:01`（见 `scripts/e2e.mjs`），不依赖运行机器真实网卡。
+- **风险**：`X-Device-Mac` 目前**不参与签名**，可被伪造（换 MAC 可绕过 MAC 黑名单，但 IP 黑名单仍生效）；MAC 是客户端自报，不能当作强身份；IP 黑名单会误伤 NAT/反代后的其他客户端。需要更强绑定时，应把 MAC 纳入签名串（契约升级）。
+
+### 2.9 部署层
 
 - 生产强制 HTTPS（Nginx 配置 + 文档），避免签名头与文件内容在公网明文传输
 - `UPLOAD_APP_SECRET` 通过环境变量/权限 600 的环境文件注入，不写进镜像、不提交仓库
@@ -98,14 +130,17 @@ canonical   = v1 \n appKey \n timestamp \n nonce \n METHOD \n path \n canonicalQ
 2. **单机内存态**：nonce 缓存和限流都在进程内存里，多实例部署时需换成 Redis（`NonceCache` 与 `RateLimiter` 均为独立组件，替换成本低）。
 3. **SQLite 元数据 + 单机内存索引**：无需安装数据库服务，适合中小规模单实例；SQLite 单写者，多实例共享同一存储根需要改成集中式数据库/对象存储，或保证同一根只由一个实例写入。
 4. **无用户体系**：当前以 appKey 维度管理文件，未做用户登录/权限隔离；如果需要多用户，应在现有签名层之上再加身份层。
-5. **审计日志**：已内置 JSONL 审计（见 4.1）；生产建议集中采集并配置异常告警，可选加 IP 黑名单。
+5. **审计日志**：已内置 JSONL 审计（见 4.1）；生产建议集中采集并配置异常告警。IP/MAC 黑名单已内置（见 2.8），当前需手动删 SQLite 行解封，没有管理界面。
 
 ## 4. 生产上线检查清单
 
 - [ ] `UPLOAD_APP_SECRET` 已替换为 `openssl rand -hex 32` 生成的随机值，且只通过环境变量/环境文件注入
 - [ ] 客户端发布前用 `UPLOAD_CLIENT_APP_KEY/SECRET/SERVER_URL` 重新构建，内置值与服务端配置一致
 - [ ] `DEVICE_BINDING_ENABLED=true`
+- [ ] `CLIENT_IDENTITY_ENFORCED=true`（环境文件 `app.security.client-identity-enforced: true`），且已发布带 `X-Device-Mac` 的新版客户端
+- [ ] 探活/监控请求已带 `X-Device-Mac`（否则会被封禁，health 也会 403）
 - [ ] HTTPS 证书已配置，客户端服务器地址使用 `https://`
+- [ ] 服务端跑的 JVM 是 JDK 21+（多版本服务器在 `scop-ftp.env` 里用 `JAVA_HOME` 指定，不要依赖系统默认）
 - [ ] 8080 端口未对公网开放（安全组/防火墙）
 - [ ] Nginx `client_max_body_size` ≥ 服务端上限，`proxy_request_buffering off`
 - [ ] `client/data/` 有备份策略，磁盘容量监控
@@ -132,8 +167,8 @@ canonical   = v1 \n appKey \n timestamp \n nonce \n METHOD \n path \n canonicalQ
 
 ## 6. 验证方式
 
-- 服务端单元/集成测试：签名测试向量、过期、重放、错误签名、哈希篡改、设备绑定
-- 端到端脚本：`E2E_STORAGE_ROOT=<root> node scripts/e2e.mjs`（真实 HTTP，覆盖 40100/40101/40102/40001/40003/40300 等错误路径，以及按目录上传/路径下载删除/越界）
+- 服务端单元/集成测试：签名测试向量、过期、重放、错误签名、哈希篡改、设备绑定；`ClientIdentityGuardIntegrationTest` 覆盖缺 MAC/IP 封禁、MAC/IP 两张黑名单 OR 拦截、activate 乱序封禁、手动删行立即解封（275 passed）
+- 端到端脚本：`E2E_STORAGE_ROOT=<root> node scripts/e2e.mjs`（真实 HTTP，覆盖 40100/40101/40102/40001/40003/40300 等错误路径，以及按目录上传/路径下载删除/越界）；开启 `client-identity-enforced` 后同样 55 passed（所有请求带 `X-Device-Mac`）
 
 ## 7. 接口认证覆盖检查（2026-10-30）
 
@@ -141,15 +176,16 @@ canonical   = v1 \n appKey \n timestamp \n nonce \n METHOD \n path \n canonicalQ
 
 - 业务接口共 **24 个路由**，全部位于 `/api/**`（storage/auth/files/terminal/audit）。
 - `SignatureFilter` 只放行 `GET /api/health` 与 CORS `OPTIONS`；其余 `/api/**` 的 GET/POST/PUT/DELETE 都要求 `X-App-Key`、`X-Timestamp`、`X-Nonce`、`X-Signature`。
+- 开启 `client-identity-enforced` 时，`ClientGuardFilter`（最高优先级）在 `SignatureFilter` 之前执行，覆盖所有 `/api/**`（含 `/api/health`）的 MAC/IP 身份与黑名单检查；测试 profile 关闭该开关，因此 `SignatureCoverageIntegrationTest` 仍按未签名 40100 验证。
 - 签名串绑定 **method + path + 规范化 query + payloadHash**；JSON body 由服务端重新计算哈希，multipart/分片上传使用参与签名的 `X-Content-Sha256` 并在落盘时复算。
 - 新增 `SignatureCoverageIntegrationTest`：从 `RequestMappingHandlerMapping` 动态取全部 `/api/**` 路由，不带签名逐一调用，必须返回 `40100`。以后新增接口若不在签名过滤范围内，该测试会直接失败。
 - 新增 query 篡改、JSON body 篡改测试：签名对应 page=1/原始 body，实际发送 page=2/篡改 body，均返回 `40100`。
 
 ### 当前仍需注意的边界
 
-1. **默认 AppSecret 是公开 demo 值**：`application.yml` 在未注入 `UPLOAD_APP_SECRET` 时回退到 `demo-secret-please-change-32-bytes-min`。生产必须用 `openssl rand -hex 32` 生成并注入，否则知道仓库默认值的人可以自行签名调用。
+1. **凭证已改为必填，但客户端二进制里仍留有演示默认值**：服务端已去掉 demo 兜底，`application.yml` / 各环境文件里 `appKey`/`appSecret` 为空时启动阶段直接失败（`AppProperties#afterPropertiesSet`），必须由环境变量、`--app-key`/`--app-secret` 或环境文件显式指定；客户端「设置」页也把两项改为必填，IPC 保存时拒绝空值。仍需注意：`src-tauri/src/builtin.rs` 仍编译进一份演示 AppKey/AppSecret 作为旧配置兜底，发布构建务必用 `UPLOAD_CLIENT_APP_KEY` / `UPLOAD_CLIENT_APP_SECRET` 覆盖，生产密钥用 `openssl rand -hex 32` 生成并定期轮换。
 2. **AppKey 是客户端级共享密钥，不是用户账号**：任何有效 appKey 都能访问全部存储根；没有按用户/租户的 ACL。分片上传的 status/cancel/chunk 也没有绑定 appKey（需要不可猜的 uploadId），多客户端互不信任时应再加会话归属校验。
-3. **设备绑定只作用于 `/api/files`**：开启 `DEVICE_BINDING_ENABLED=true` 后，终端 `/api/terminal/exec`、审计查询、存储根查询仍只校验签名，不校验 deviceId；终端默认还是开启的，生产应显式 `UPLOAD_TERMINAL_ENABLED=false` 或再加设备绑定。
-4. **`GET /api/health` 公开**：只返回状态与时间，不返回文件/路径/密钥信息，保留给探活使用。
+3. **设备绑定只作用于 `/api/files`**：开启 `DEVICE_BINDING_ENABLED=true` 后，终端 `/api/terminal/exec`、审计查询、存储根查询仍只校验签名，不校验 deviceId；终端默认还是开启的，生产环境文件应显式 `app.terminal.enabled: false` 或再加设备绑定。开启 `client-identity-enforced` 后 MAC/IP 黑名单对**全部** `/api/**` 生效（含终端/审计），但只拦“已封禁/缺身份/乱序”，不做 deviceId 绑定。
+4. **`GET /api/health` 无需签名**：只返回状态与时间，不返回文件/路径/密钥信息；开启 `client-identity-enforced` 后仍需带合法 `X-Device-Mac`，否则 40312 并被写入黑名单（探活/监控必须带头）。
 5. **nonce/限流是单机内存态**：服务重启会清空 nonce 缓存（5 分钟窗口内的抓包仍有重放窗口）；多实例部署需要 Redis。Nginx 反代后 `getRemoteAddr()` 是反代 IP，限流维度会退化为 appKey，生产需配置可信 real_ip。
 6. **客户端内置密钥可被逆向**：这是“提高直接调用成本”，不是不可破；不要把它当作用户身份认证，公网部署必须 HTTPS、限制网络入口并定期轮换密钥。

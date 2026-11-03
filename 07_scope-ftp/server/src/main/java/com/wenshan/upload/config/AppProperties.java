@@ -1,21 +1,77 @@
 package com.wenshan.upload.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 服务端全部可配置项，前缀 {@code app}。
- * 支持环境变量覆盖（见 application.yml 中的 ${UPLOAD_*} 占位符）。
+ *
+ * <p>配置来源：全局公共项在 {@code application.yml}；环境差异项在各环境文件
+ * {@code application-<env>.yml}（dev / docker / xiaoshan / xihu …）。
+ * 只有客户端凭证支持 {@code UPLOAD_APP_KEY} / {@code UPLOAD_APP_SECRET} 环境变量注入，
+ * 其余配置不再走环境变量。</p>
+ *
+ * <p>凭证没有内置默认值：{@code AppKey}/{@code AppSecret} 必须显式配置（环境变量、
+ * 启动参数 {@code --app-key}/{@code --app-secret}，或当前环境文件），缺失时启动即失败。</p>
  */
 @ConfigurationProperties(prefix = "app")
-public class AppProperties {
+public class AppProperties implements InitializingBean {
+
+    private static final Logger log = LoggerFactory.getLogger(AppProperties.class);
 
     private final Security security = new Security();
     private final Storage storage = new Storage();
     private final Terminal terminal = new Terminal();
     private final Audit audit = new Audit();
+
+    /** 启动即校验客户端凭证：没有可用的 AppKey/AppSecret 时直接让 Spring 启动失败。 */
+    @Override
+    public void afterPropertiesSet() {
+        validateCredentials();
+    }
+
+    private void validateCredentials() {
+        List<Client> clients = security.getClients();
+        boolean anyEnabled = false;
+        Set<String> appKeys = new HashSet<>();
+        for (int i = 0; i < clients.size(); i++) {
+            Client client = clients.get(i);
+            if (client == null || !client.isEnabled()) {
+                continue;
+            }
+            anyEnabled = true;
+            String where = "app.security.clients[" + i + "]";
+            String appKey = client.getAppKey() == null ? "" : client.getAppKey().trim();
+            String appSecret = client.getAppSecret() == null ? "" : client.getAppSecret().trim();
+            if (appKey.isEmpty()) {
+                throw new IllegalStateException("缺少 AppKey：" + where + ".appKey 为空。"
+                        + "请通过环境变量 UPLOAD_APP_KEY 或启动参数 --app-key 指定后再启动服务端。");
+            }
+            if (appSecret.isEmpty()) {
+                throw new IllegalStateException("缺少 AppSecret：" + where + ".appSecret 为空。"
+                        + "请通过环境变量 UPLOAD_APP_SECRET 或启动参数 --app-secret 指定后再启动服务端。");
+            }
+            if (!appKeys.add(appKey)) {
+                throw new IllegalStateException("appKey 重复：" + where + ".appKey=" + appKey
+                        + " 与前面的客户端重复，请检查环境文件配置。");
+            }
+            if (appSecret.length() < 32) {
+                log.warn("AppSecret 长度不足 32 字符（{}），生产环境请使用 openssl rand -hex 32 生成", where);
+            }
+        }
+        if (!anyEnabled) {
+            throw new IllegalStateException("没有启用任何客户端：请在 application.yml/application-<env>.yml 的 "
+                    + "app.security.clients 中配置，或通过环境变量 UPLOAD_APP_KEY / UPLOAD_APP_SECRET"
+                    + "（启动参数 --app-key / --app-secret）指定 AppKey 与 AppSecret。");
+        }
+    }
 
     public Security getSecurity() {
         return security;
@@ -41,8 +97,19 @@ public class AppProperties {
         /** nonce 缓存 TTL（毫秒），默认 10 分钟。 */
         private long nonceTtlMs = 600_000L;
 
-        /** 是否开启设备绑定校验（本地开发默认关闭，生产建议通过环境变量开启）。 */
+        /** 是否开启设备绑定校验（本机开发环境文件里关闭，生产环境文件里开启）。 */
         private boolean deviceBindingEnabled = false;
+
+        /**
+         * 是否强制客户端身份校验（MAC/IP 黑名单 + verify→activate 顺序校验）。
+         *
+         * <p>关闭时不做任何身份拦截；开启后所有 {@code /api/**}（含 health）都必须带合法
+         * {@code X-Device-Mac}，缺失/非法或命中黑名单直接 403，并写入黑名单。</p>
+         */
+        private boolean clientIdentityEnforced = false;
+
+        /** verify 成功后允许多久内调用 activate（毫秒），默认 10 分钟。 */
+        private long verifyActivateWindowMs = 600_000L;
 
         private final RateLimit rateLimit = new RateLimit();
 
@@ -70,6 +137,22 @@ public class AppProperties {
 
         public void setDeviceBindingEnabled(boolean deviceBindingEnabled) {
             this.deviceBindingEnabled = deviceBindingEnabled;
+        }
+
+        public boolean isClientIdentityEnforced() {
+            return clientIdentityEnforced;
+        }
+
+        public void setClientIdentityEnforced(boolean clientIdentityEnforced) {
+            this.clientIdentityEnforced = clientIdentityEnforced;
+        }
+
+        public long getVerifyActivateWindowMs() {
+            return verifyActivateWindowMs;
+        }
+
+        public void setVerifyActivateWindowMs(long verifyActivateWindowMs) {
+            this.verifyActivateWindowMs = verifyActivateWindowMs;
         }
 
         public RateLimit getRateLimit() {
@@ -121,6 +204,11 @@ public class AppProperties {
         }
     }
 
+    /**
+     * 预配发客户端（{@code app.security.clients[]}），写在各环境文件里。
+     * 只有凭证支持环境变量注入：{@code UPLOAD_APP_KEY} / {@code UPLOAD_APP_SECRET}；
+     * 启动 Jar 时的 {@code --app-key}/{@code --app-secret} 会映射到第一个客户端。
+     */
     public static class Client {
 
         private String appKey;
@@ -176,7 +264,7 @@ public class AppProperties {
 
     public static class Storage {
 
-        /** 默认根 id / 展示名 / 路径（与 application.yml 的默认 roots 保持一致）。 */
+        /** 默认根 id / 展示名 / 路径（仅当某个环境文件没写 roots 时的兜底默认值）。 */
         public static final String DEFAULT_ROOT_ID = "default";
         public static final String DEFAULT_ROOT_NAME = "默认目录";
         public static final String DEFAULT_ROOT_PATH = "./data";
@@ -185,9 +273,8 @@ public class AppProperties {
          * 多存储根目录（唯一存储配置）：第一个根为默认根（接口不传 root 时使用）。
          * 根下只放用户的真实文件/目录；每个根内部元数据在隐藏目录 &lt;root&gt;/.upload-meta/。
          *
-         * <p>也可用环境变量 {@code UPLOAD_STORAGE_ROOTS} 覆盖，格式 {@code id=path,id2=path2}
-         * （简单 demo 形式；复杂场景请用 application.yml/外部配置）。
-         * 显式配置为空列表时启动失败（不再隐式创建单根）。</p>
+         * <p>只在各环境文件 {@code application-<env>.yml} 里配置，不再支持
+         * {@code UPLOAD_STORAGE_ROOTS} 等环境变量覆盖。显式配置为空列表时启动失败。</p>
          */
         private List<Root> roots = new ArrayList<>(List.of(
                 new Root(DEFAULT_ROOT_ID, DEFAULT_ROOT_NAME, DEFAULT_ROOT_PATH)));
@@ -326,8 +413,8 @@ public class AppProperties {
     }
 
     /**
-     * 远程服务器终端配置（契约 3.21）。默认开启，仅建议本机/内网使用；
-     * 暴露公网或多人共用环境时请设置 UPLOAD_TERMINAL_ENABLED=false。
+     * 远程服务器终端配置（契约 3.21）。总开关在各环境文件里（本机开发开启，生产关闭）；
+     * 暴露公网或多人共用环境时必须在对应环境文件里设 {@code app.terminal.enabled: false}。
      */
     public static class Terminal {
 

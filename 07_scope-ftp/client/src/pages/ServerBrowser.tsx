@@ -756,12 +756,12 @@ export default function ServerBrowser({
     [message, rootId],
   );
 
-  /** 执行删除并从服务端刷新当前目录（文件与空目录通用）。 */
+  /** 执行删除并从服务端刷新当前目录（文件与目录通用；目录递归删除）。 */
   const performDelete = useCallback(
-    async (record: DirEntry) => {
+    async (record: DirEntry, recursive: boolean) => {
       setDeletingPath(record.path);
       try {
-        await deleteServerFile(record.path, rootId);
+        await deleteServerFile(record.path, rootId, recursive);
         message.success(
           record.type === "directory"
             ? `已删除目录：${record.name}`
@@ -771,7 +771,7 @@ export default function ServerBrowser({
         if (selectedPathRef.current === record.path) selectFinderPath(null);
         await load(currentPath);
       } catch (error) {
-        // 非空目录（40000）等失败直接用服务端可展示错误提示。
+        // 非空目录被旧服务端拒绝（40000）等失败直接用服务端可展示错误提示。
         message.error(errorMessage(error));
       } finally {
         setDeletingPath(null);
@@ -1276,23 +1276,54 @@ export default function ServerBrowser({
     });
   }, [editor, editorTabSize]);
 
-  /** 删除确认：行内按钮与右键菜单共用同一套逻辑。 */
+  /**
+   * 删除确认：行内按钮与右键菜单共用同一套逻辑。
+   *
+   * 目录会先查一次目录内容，非空时给出「一并删除」的强提示；无论空/非空/查询失败，
+   * 确认后都带 `recursive=true` 让服务端一次性删除（空目录也递归，避免嵌套根下
+   * 隐藏的 `.upload-meta` 目录造成「非空」误判）。
+   */
   const requestDelete = useCallback(
-    (record: DirEntry) => {
+    async (record: DirEntry) => {
       setContextMenu(null);
       const isDirectory = record.type === "directory";
+
+      if (!isDirectory) {
+        modal.confirm({
+          title: `删除文件「${record.name}」？`,
+          content: "删除后不可恢复。",
+          okText: "删除",
+          cancelText: "取消",
+          okButtonProps: { danger: true },
+          onOk: () => performDelete(record, false),
+        });
+        return;
+      }
+
+      // 列目录期间不置 deletingPath，避免误显示「删除中…」。
+      let content: string;
+      try {
+        const listing = await listServerDir(record.path, rootId);
+        const count = listing.entries.length;
+        content =
+          count > 0
+            ? `目录非空（共 ${count} 项），其中的文件和子目录会一并删除，且不可恢复。`
+            : "该目录为空，删除后不可恢复。";
+      } catch {
+        // 列目录失败（权限/网络等）时保守提示：可能非空，删除同样不可恢复。
+        content = "若目录非空，其中的文件和子目录会一并删除，且不可恢复。";
+      }
+
       modal.confirm({
-        title: `删除${isDirectory ? "目录" : "文件"}「${record.name}」？`,
-        content: isDirectory
-          ? "仅空目录可以删除；非空目录会被服务端拒绝。删除后不可恢复。"
-          : "删除后不可恢复。",
+        title: `删除目录「${record.name}」？`,
+        content,
         okText: "删除",
         cancelText: "取消",
         okButtonProps: { danger: true },
-        onOk: () => performDelete(record),
+        onOk: () => performDelete(record, true),
       });
     },
-    [modal, performDelete],
+    [modal, performDelete, rootId],
   );
 
   /** 打开行右键菜单：阻止浏览器默认菜单，并做视口边缘避让。 */
@@ -2042,7 +2073,7 @@ export default function ServerBrowser({
             className="row-context-menu-item row-context-menu-item-danger"
             data-testid="context-delete"
             disabled={deletingPath !== null}
-            onClick={() => requestDelete(contextMenu.entry)}
+            onClick={() => void requestDelete(contextMenu.entry)}
           >
             <DeleteOutlined />
             <span>{deletingPath ? "删除中…" : "删除"}</span>

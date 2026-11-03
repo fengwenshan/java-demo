@@ -12,6 +12,9 @@ app:
   audit:
     dir: target/test-audit/audit-${random.uuid}
   security:
+    # 测试默认关闭客户端身份强制校验：历史 267 个测试不带 X-Device-Mac。
+    # 需要验证黑名单/顺序校验的测试用 @SpringBootTest(properties=...) 打开。
+    client-identity-enforced: false
     rate-limit:
       capacity: 1000
       refill-per-second: 1000

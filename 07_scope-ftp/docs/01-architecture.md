@@ -19,13 +19,13 @@
 ### 服务端
 
 - Java 21，Spring Boot 3.3.5（与仓库其它模块保持一致），Maven 构建
-- 持久化：**SQLite 本地库（无需数据库服务）**。元数据存 `<root>/.upload-meta/metadata.sqlite3`（隐藏目录，WAL/事务；启动加载进内存索引、写成功替换快照）；审计日志双写 `<UPLOAD_AUDIT_DIR>/audit.sqlite3` + JSONL；分片上传会话存系统临时目录 `${java.io.tmpdir}/scop-ftp-sessions/`（24h 过期清理）
-- 存储根目录：**只支持多个存储根** `app.storage.roots[]`（每项 `{id,name,path}`，第一个为默认根；yaml 默认一个 `default` 根指向 `./data`，可用 `UPLOAD_STORAGE_ROOTS="work=/a,media=/b"` 覆盖；roots 为空启动失败，单根 `root-dir` 已删除）。启动时解析绝对路径、创建并校验可写；**每个根只放用户文件/目录**，内部元数据在各根 `.upload-meta/`，multipart 临时文件放系统临时目录；**所有文件操作只在请求指定的 root 内**（拒绝绝对路径、`..`、符号链接逃逸、跨根访问）
+- 持久化：**SQLite 本地库（无需数据库服务）**。元数据存 `<root>/.upload-meta/metadata.sqlite3`（隐藏目录，WAL/事务；启动加载进内存索引、写成功替换快照）；审计日志双写 `<环境文件 app.audit.dir>/audit.sqlite3` + JSONL；分片上传会话存系统临时目录 `${java.io.tmpdir}/scop-ftp-sessions/`（24h 过期清理）
+- 存储根目录：**只支持多个存储根** `app.storage.roots[]`（每项 `{id,name,path}`，第一个为默认根；写在各自的环境文件 `application-<env>.yml` 里，如 dev 是 `./data`、docker 是 `/app/data`；roots 为空启动失败，单根 `root-dir` 已删除）。启动时解析绝对路径、创建并校验可写；**每个根只放用户文件/目录**，内部元数据在各根 `.upload-meta/`，multipart 临时文件放系统临时目录；**所有文件操作只在请求指定的 root 内**（拒绝绝对路径、`..`、符号链接逃逸、跨根访问）
 - 文件存储（FTP 式）：上传文件直接写入用户当前浏览的目录并保留原始文件名，重名自动加 ` (1)` 序号；不再使用 `files/yyyy/MM/dd/UUID` 布局
 - 元数据：文件名、大小、类型、SHA-256、说明、appKey、deviceId、上传时间；持久化在 `<root>/.upload-meta/metadata.sqlite3`（SQLite，WAL/事务/索引），启动加载为内存只读快照
-- 安全：`SignatureFilter` 统一校验所有 `/api/**` 业务接口（`/api/health` 除外），
-  校验 appKey、时间戳窗口、HMAC-SHA256 签名、nonce 防重放、可选的设备绑定、令牌桶限流
-- 端口：8080，上下文路径：`/api`
+- 安全：`ClientGuardFilter`（最高优先级，可选的身份强制：所有 `/api/**` 含 health 的 MAC/IP 黑名单）→ `SignatureFilter` 统一校验业务接口，
+  校验 appKey、时间戳窗口、HMAC-SHA256 签名、nonce 防重放、可选的设备绑定、令牌桶限流；开启身份强制时 activate 还要求同 MAC+IP 的近期 verify
+- 端口：默认 9090（dev/application.yml；docker/xiaoshan 8080、xihu 8787 由环境文件覆盖），上下文路径：`/api`
 
 ### 客户端
 
@@ -33,14 +33,14 @@
 - 所有网络请求、HMAC 签名、文件读写都在 **Rust 侧**完成，WebView 层拿不到 appSecret
 - **AppKey / AppSecret 默认内置在客户端**（`src-tauri/src/builtin.rs`，构建时可用 `UPLOAD_CLIENT_APP_KEY` / `UPLOAD_CLIENT_APP_SECRET` 覆盖）；设置页可按服务器填写自定义 AppKey/AppSecret，留空使用内置值
 - 主界面为左右两栏（FTP 式）：左侧是当前连接的服务器信息（状态/地址/设备/存储目录/大小上限 + 验证连接/设置），右侧是服务器目录浏览器
-- 右侧目录浏览器支持拖拽上传：把文件（可多选）拖进右侧任意位置即上传到**当前浏览目录**，并复用 `upload-progress` 显示进度；文件行可下载/删除，目录行点击进入
+- 右侧目录浏览器支持拖拽上传：把文件（可多选）拖进右侧任意位置即上传到**当前浏览目录**，并复用 `upload-progress` 显示进度；文件行可下载/删除，目录行点击进入，目录也可删除（非空目录需二次确认后由服务端 `recursive=true` 递归删除）
 - 大文件（>32MB）自动分片上传（8MB/片）并支持断点续传；右侧搜索框可在存储根目录内递归搜索，点结果跳到所在目录并高亮
 - 左侧支持保存多台服务器（添加/切换/编辑），每台独立 deviceId，当前 active server 决定所有请求目标
-- 审计：`SignatureFilter` 对每个 `/api/**` 请求生成 `X-Request-Id`，异步写 JSONL + SQLite（`app.audit.*`），成功/失败/签名失败/限流均记录，敏感字段脱敏；日志目录默认 `./logs/audit`，不在存储根内；客户端用 `GET /api/audit/logs?category=both` 合并查看操作/连接日志（也可用 `operation` / `connection` 单独筛选）
-- 底部远程终端面板：签名 `POST /api/terminal/exec`，服务端执行 `/bin/sh -lc`，会话 cwd 持久；终端只能访问 `app.storage.roots` 内目录（TerminalScope + TerminalPathGuard 拦截越界 cwd/参数/重定向/symlink），高危命令由 TerminalGuard 拦截并弹警告；**护栏不是沙箱**，可用 `UPLOAD_TERMINAL_ENABLED=false` 关闭
-- 目录列表为 Finder 式（名称/修改日期/大小/种类），单击选中、↑↓ 移动、Enter/再点重命名、双击文件打开、双击目录进入；下载/删除等走右键菜单
+- 审计：`SignatureFilter` 对每个 `/api/**` 请求生成 `X-Request-Id`，异步写 JSONL + SQLite（`app.audit.*`），成功/失败/签名失败/限流均记录，敏感字段脱敏；日志目录由各环境文件的 `app.audit.dir` 指定（dev 是 `./logs/dev/audit`），不在存储根内；客户端用 `GET /api/audit/logs?category=both` 合并查看操作/连接日志（也可用 `operation` / `connection` 单独筛选）
+- 底部远程终端面板：签名 `POST /api/terminal/exec`，服务端执行 `/bin/sh -lc`，会话 cwd 持久；终端只能访问 `app.storage.roots` 内目录（TerminalScope + TerminalPathGuard 拦截越界 cwd/参数/重定向/symlink），高危命令由 TerminalGuard 拦截并弹警告；**护栏不是沙箱**，生产环境文件里设 `app.terminal.enabled: false` 关闭
+- 目录列表为 Finder 式（名称/修改日期/大小/种类），单击选中、↑↓ 移动、Enter/再点重命名、双击文件打开、双击目录进入；下载/删除等走右键菜单；删除支持文件与目录，非空目录删除前强提示「目录非空（共 N 项），其中的文件和子目录会一并删除，且不可恢复」，确认后带 `recursive=true` 一次性递归删除
 - 左侧「存储目录」在配置了**多个**存储根时显示（来自 `GET /api/storage/roots`），切换后右侧浏览/上传/下载/删除/搜索都限定在该根内；只有一个根时隐藏（根名已显示在面包屑）
-- 目录表格行支持右键菜单：重命名（文件/目录，单段名字、不覆盖）、删除（文件/空目录）；重命名走 `POST /api/files/rename`，元数据同步
+- 目录表格行支持右键菜单：重命名（文件/目录，单段名字、不覆盖）、删除（文件/目录；非空目录需二次确认后按 `recursive=true` 递归删除，含嵌套存储根时拒绝）；重命名走 `POST /api/files/rename`，元数据同步
 - VSCode 式快速查找：⌘P/Ctrl+P 打开浮层，调 `GET /api/files/search` 同时搜文件与文件夹，键盘导航后跳转/进入
 - 设置页从左侧进入，点左侧服务器即可回到目录，不在内容区重复放「返回目录」；不再有「上传」「文件」顶部 Tab（上传页与已上传文件列表已移除，`list_files` API 仍保留）
 - 上传使用 `reqwest` multipart 流式上传，进度通过 Tauri 事件回传前端
@@ -84,7 +84,7 @@
 | DELETE | `/api/files/{id}` | 按 id 删除文件 | 是 |
 | GET | `/api/files/dir?path=` | 浏览存储根目录下的真实目录内容（隐藏 `.upload-meta`） | 是 |
 | GET | `/api/files/download?path=` | 按相对路径下载 root 内任意文件 | 是 |
-| DELETE | `/api/files?path=` | 按相对路径删除 root 内文件或空目录 | 是 |
+| DELETE | `/api/files?path=&recursive=` | 按相对路径删除 root 内文件或目录（非空目录需 `recursive=true`） | 是 |
 | POST | `/api/files/upload/init` | 分片上传：创建会话（返回 uploadId/chunkSize） | 是 |
 | PUT | `/api/files/upload/{uploadId}/chunk?index=` | 分片上传：上传一片（裸字节 + X-Content-Sha256） | 是 |
 | GET | `/api/files/upload/{uploadId}` | 分片上传：查询已收分片（续传） | 是 |

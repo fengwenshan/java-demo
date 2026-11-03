@@ -122,6 +122,30 @@ export async function verifyConnection(): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_connection");
 }
 
+export interface VerifyConnectionPreviewArgs {
+  serverUrl: string;
+  /** 自定义 AppKey；空串/不传表示使用内置默认。 */
+  appKey?: string;
+  /** 自定义 AppSecret；空串/不传表示使用内置默认。 */
+  appSecret?: string;
+}
+
+/**
+ * 添加服务器前的预览验证（契约 3.2）：用表单里的地址与凭据直接验证，
+ * 不保存、不切换配置，因此不需要先把服务器加进列表。
+ * 验证成功后再调用 `saveServer` 真正添加服务器。
+ */
+export async function verifyConnectionPreview(
+  args: VerifyConnectionPreviewArgs,
+): Promise<VerifyResult> {
+  requireDesktop();
+  return invoke<VerifyResult>("verify_connection_preview", {
+    serverUrl: args.serverUrl,
+    appKey: args.appKey ?? "",
+    appSecret: args.appSecret ?? "",
+  });
+}
+
 /** 激活设备（契约 3.3；针对当前激活服务器的 deviceId/deviceName）。 */
 export async function activateDevice(): Promise<ActivateResult> {
   requireDesktop();
@@ -190,13 +214,24 @@ export async function downloadServerFile(args: {
   });
 }
 
-/** 按相对路径删除服务器目录中的文件（FTP 式目录浏览）。 */
+/**
+ * 按相对路径删除服务器目录中的文件/目录（FTP 式目录浏览）。
+ *
+ * `recursive=true` 时服务端一次性递归删除非空目录（服务端仍在用旧接口时会
+ * 返回「目录非空，不能删除」，由调用方原样展示）。
+ */
 export async function deleteServerFile(
   path: string,
   root?: string | null,
+  recursive?: boolean,
 ): Promise<void> {
   requireDesktop();
-  await invoke("delete_server_file", { path, root: root ?? null });
+  // Tauri 可选参数必须显式传值（不能 undefined），否则 Rust 侧会报 missing key。
+  await invoke("delete_server_file", {
+    path,
+    root: root ?? null,
+    recursive: recursive ?? false,
+  });
 }
 
 /**

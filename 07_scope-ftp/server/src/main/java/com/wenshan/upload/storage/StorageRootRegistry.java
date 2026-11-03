@@ -26,11 +26,8 @@ import java.util.regex.Pattern;
 /**
  * 多存储根注册表：把配置解析成一组 {@link StorageRoot}，并作为「root 参数 → 具体根」的唯一入口。
  *
- * <p>配置来源（优先级从高到低）：</p>
- * <ol>
- *   <li>环境变量 {@code UPLOAD_STORAGE_ROOTS}：{@code id=path,id2=path2} 简单形式；</li>
- *   <li>{@code app.storage.roots[]}（id/name/path 列表）；</li>
- * </ol>
+ * <p>配置来源只有一处：当前环境文件里的 {@code app.storage.roots[]}（id/name/path 列表，
+ * 第一个为默认根）。不再支持 {@code UPLOAD_STORAGE_ROOTS} 等环境变量覆盖，避免"配置被悄悄改掉"。</p>
  * <p>解析后没有根配置时启动失败（中文提示），不会隐式使用 ./data。</p>
  *
  * <p>启动校验（失败快速失败，服务不启动）：id 必须匹配 {@code ^[a-zA-Z0-9_-]{1,32}$} 且唯一；
@@ -41,8 +38,6 @@ public class StorageRootRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(StorageRootRegistry.class);
 
-    public static final String ENV_ROOTS = "UPLOAD_STORAGE_ROOTS";
-
     private static final Pattern ID_PATTERN = Pattern.compile("^[a-zA-Z0-9_-]{1,32}$");
 
     private final List<StorageRoot> roots;
@@ -51,10 +46,10 @@ public class StorageRootRegistry {
 
     @Autowired
     public StorageRootRegistry(AppProperties properties) {
-        this(properties, System.getenv(ENV_ROOTS));
+        this(properties, null);
     }
 
-    /** 测试用：可显式传入 {@code id=path,...} 形式的根配置（等价于环境变量内容）。 */
+    /** 测试用：直接传 {@code id=path,...} 形式的根配置（生产只从 app.storage.roots[] 读取）。 */
     StorageRootRegistry(AppProperties properties, String rootsSpec) {
         List<Spec> specs = resolveSpecs(properties, rootsSpec);
         Map<String, StorageRoot> registered = new LinkedHashMap<>();
@@ -144,7 +139,7 @@ public class StorageRootRegistry {
     private static List<Spec> resolveSpecs(AppProperties properties, String rootsSpec) {
         List<Spec> specs = new ArrayList<>();
         if (rootsSpec != null && !rootsSpec.isBlank()) {
-            specs.addAll(parseEnvSpec(rootsSpec));
+            specs.addAll(parseSimpleSpec(rootsSpec));
             return specs;
         }
         for (AppProperties.Root root : properties.getStorage().getRoots()) {
@@ -154,13 +149,13 @@ public class StorageRootRegistry {
         }
         if (specs.isEmpty()) {
             throw new IllegalStateException(
-                    "未配置存储根：请设置 app.storage.roots[] 或 UPLOAD_STORAGE_ROOTS（id=path,id2=path2）");
+                    "未配置存储根：请在当前环境文件的 app.storage.roots[] 里配置 id/name/path");
         }
         return specs;
     }
 
-    /** 解析 {@code id=path,id2=path2}（简单形式；路径中允许出现 '='，只按第一个 '=' 切分）。 */
-    private static List<Spec> parseEnvSpec(String rootsSpec) {
+    /** 测试用：解析 {@code id=path,id2=path2} 简写（路径中允许出现 '='，只按第一个 '=' 切分）。 */
+    private static List<Spec> parseSimpleSpec(String rootsSpec) {
         List<Spec> specs = new ArrayList<>();
         for (String rawPair : rootsSpec.split(",")) {
             String pair = rawPair.trim();
@@ -170,18 +165,18 @@ public class StorageRootRegistry {
             int separator = pair.indexOf('=');
             if (separator <= 0 || separator == pair.length() - 1) {
                 throw new IllegalStateException(
-                        "环境变量 " + ENV_ROOTS + " 格式应为 id=path,id2=path2: " + rootsSpec);
+                        "存储根简写格式应为 id=path,id2=path2: " + rootsSpec);
             }
             String id = pair.substring(0, separator).trim();
             String path = pair.substring(separator + 1).trim();
             if (id.isEmpty() || path.isEmpty()) {
                 throw new IllegalStateException(
-                        "环境变量 " + ENV_ROOTS + " 存在空的 id 或 path: " + rootsSpec);
+                        "存储根简写存在空的 id 或 path: " + rootsSpec);
             }
             specs.add(new Spec(id, null, path));
         }
         if (specs.isEmpty()) {
-            throw new IllegalStateException("环境变量 " + ENV_ROOTS + " 未包含任何有效的 id=path");
+            throw new IllegalStateException("存储根简写未包含任何有效的 id=path");
         }
         return specs;
     }

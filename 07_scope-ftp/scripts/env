@@ -1,0 +1,3 @@
+# 基础构建配置（可入库）；本机私有值放 scripts/env.local / env.local.<profile>（已被 .gitignore 忽略）。
+# 改完直接运行 scripts/mvn.sh / scripts/run-server.sh 即可，不用每次都 export JAVA_HOME。
+JAVA_HOME=

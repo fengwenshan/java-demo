@@ -303,6 +303,82 @@ class RenameIntegrationTest extends IntegrationTestSupport {
     }
 
     @Test
+    void deleteNonEmptyDirectoryRecursivelyRemovesTreeAndMetadata() throws Exception {
+        byte[] a = "a".getBytes(StandardCharsets.UTF_8);
+        byte[] b = "b".getBytes(StandardCharsets.UTF_8);
+        Files.createDirectories(ROOT_A.resolve("docs/sub"));
+        String idA = uploadData(ROOT_A_ID, "docs", "a.txt", a).path("id").asText();
+        String idB = uploadData(ROOT_A_ID, "docs/sub", "b.txt", b).path("id").asText();
+
+        // 显式 recursive=false 与默认行为一致：非空目录 → 40000，磁盘与元数据都不动
+        mockMvc.perform(signedDeleteQuery(DELETE_PATH,
+                        Map.of("root", ROOT_A_ID, "path", "docs", "recursive", "false")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(40000))
+                .andExpect(jsonPath("$.message").value(containsString("目录非空")));
+        assertThat(ROOT_A.resolve("docs/a.txt")).hasBinaryContent(a);
+        assertThat(ROOT_A.resolve("docs/sub/b.txt")).hasBinaryContent(b);
+        assertThat(storedPathOfIn(ROOT_A_ID, idA)).isEqualTo("docs/a.txt");
+        assertThat(storedPathOfIn(ROOT_A_ID, idB)).isEqualTo("docs/sub/b.txt");
+
+        // recursive=true：一次请求删掉整棵子树，磁盘与元数据记录都清空
+        mockMvc.perform(signedDeleteQuery(DELETE_PATH,
+                        Map.of("root", ROOT_A_ID, "path", "docs", "recursive", "true")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.path").value("docs"));
+        assertThat(ROOT_A.resolve("docs")).doesNotExist();
+        assertThat(findRecord(ROOT_A_ID, idA)).isNull();
+        assertThat(findRecord(ROOT_A_ID, idB)).isNull();
+        // 被删文件按 id 下载 → 40400
+        mockMvc.perform(TestSigner.signedGet("/api/files/" + idA + "/download", null))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(40400));
+
+        // 再删同一个目录 → 40400
+        mockMvc.perform(signedDeleteQuery(DELETE_PATH,
+                        Map.of("root", ROOT_A_ID, "path", "docs", "recursive", "true")))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(40400));
+    }
+
+    @Test
+    void deleteEmptyDirectoryRecursivelySucceeds() throws Exception {
+        Files.createDirectories(ROOT_A.resolve("docs/empty"));
+
+        mockMvc.perform(signedDeleteQuery(DELETE_PATH,
+                        Map.of("root", ROOT_A_ID, "path", "docs/empty", "recursive", "true")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.path").value("docs/empty"));
+        assertThat(ROOT_A.resolve("docs/empty")).doesNotExist();
+        assertThat(ROOT_A.resolve("docs")).isDirectory();
+    }
+
+    @Test
+    void deleteDirectoryWithSymlinkRecursivelyKeepsExternalTarget() throws Exception {
+        Path external = Files.createTempDirectory("rename-external-").toAbsolutePath().normalize();
+        try {
+            byte[] externalContent = "external-keep".getBytes(StandardCharsets.UTF_8);
+            Files.write(external.resolve("keep.txt"), externalContent);
+            Files.createDirectories(ROOT_A.resolve("docs/sub"));
+            Files.writeString(ROOT_A.resolve("docs/sub/local.txt"), "local");
+            Files.createSymbolicLink(ROOT_A.resolve("docs/link-to-external"), external);
+
+            mockMvc.perform(signedDeleteQuery(DELETE_PATH,
+                            Map.of("root", ROOT_A_ID, "path", "docs", "recursive", "true")))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.path").value("docs"));
+            // 链接本身随目录一起删除，但绝不跟随到外部目标
+            assertThat(ROOT_A.resolve("docs")).doesNotExist();
+            assertThat(external).isDirectory();
+            assertThat(external.resolve("keep.txt")).hasBinaryContent(externalContent);
+        } finally {
+            deleteRecursively(external);
+        }
+    }
+
+    @Test
     void deleteFileByPathRegression() throws Exception {
         byte[] content = "delete me".getBytes(StandardCharsets.UTF_8);
         String id = uploadData(ROOT_A_ID, "docs", "f.txt", content).path("id").asText();
@@ -399,6 +475,12 @@ class RenameIntegrationTest extends IntegrationTestSupport {
         return rootRegistry.requireRoot(rootId).metaStore()
                 .findFile(TestSigner.APP_KEY, id)
                 .orElseThrow();
+    }
+
+    private FileRecord findRecord(String rootId, String id) {
+        return rootRegistry.requireRoot(rootId).metaStore()
+                .findFile(TestSigner.APP_KEY, id)
+                .orElse(null);
     }
 
     private static List<String> namesOf(JsonNode entries) {

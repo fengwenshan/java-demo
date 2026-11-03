@@ -1,8 +1,9 @@
 # 构建缓存（沙箱环境专用，体积大）
 .cache/
 
-# 运行期数据
+# 运行期数据（dev 用 data/，其它环境用 data-*/）
 data/
+data-*/
 logs/
 *.log
 *.sqlite3
@@ -28,6 +29,9 @@ dist/
 .vscode/
 .DS_Store
 
+# 本机构建配置（JDK 路径等私有设置）：文件名含 local 的 env 文件一律不入库
+scripts/env*local*
+
 # 部署本地配置
 deploy/.env
 deploy/.env.deploy
@@ -37,7 +41,6 @@ deploy/logs/
 # 打包产物
 release/
 
-# 私有环境配置（不入库；GitHub Actions 用 Secrets 注入）
-server/src/main/resources/application-default.yml
-server/src/main/resources/application-xiaoshan.yml
-server/src/main/resources/application-xihu.yml
+# 环境配置一律不入库：仓库只入库 application.yml（自带可独立启动的默认值）。
+# 本地/私有环境文件（dev/docker/xiaoshan/xihu）与 CI 用 Secrets 注入的生产配置都不提交。
+server/src/main/resources/application-*.yml

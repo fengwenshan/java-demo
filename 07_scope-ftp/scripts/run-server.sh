@@ -1,48 +1,45 @@
 #!/usr/bin/env bash
-# 启动服务端（本地开发）：优先复用已打包的 Jar，没有则先构建。
+# 启动服务端（本地开发）。端口/存储根等默认用 application.yml（8080、./data），
+# 若存在本地的 application-<env>.yml 环境文件则覆盖；环境文件一律不入库。
+#
+# 凭证必须显式指定：--app-key/--app-secret；缺失时服务端启动失败，没有内置默认值。
 #
 # 用法：
-#   ./scripts/run-server.sh [--build] [--app-key KEY] [--app-secret SECRET] [--server.port PORT] [其它 Spring Boot 参数...]
+#   ./scripts/run-server.sh [--env <环境名>] [--build] [--app-key KEY] [--app-secret SECRET] [其它 Spring Boot 参数...]
 #
-# AppKey/AppSecret 未指定时使用 application.yml 里的内置演示默认值；
-# 也可以直接用环境变量 UPLOAD_APP_KEY / UPLOAD_APP_SECRET 覆盖。
+# 环境 = server/src/main/resources/application-<env>.yml（可选，本地/私有，不入库）：
+#   dev（默认）/ docker / xiaoshan / xihu
+# 不传 --env 时默认 dev；application-dev.yml 不存在时用 application.yml（仍需凭证）。
+# 打包不需要凭证；启动时没有凭证会直接失败。
+#
+# 改过环境文件/application.yml 会自动重新打包；--build 可强制重新打包。
 set -euo pipefail
-source "$(dirname "$0")/env.sh"
-cd "$PROJECT_ROOT"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+ENV_NAME="dev"
+ENV_EXPLICIT=0
 BUILD=0
-PORT="${SERVER_PORT:-8080}"
 PASSTHROUGH=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --env|--profile)
+      [[ $# -ge 2 ]] || { echo "--env 缺少值（如 dev）" >&2; exit 2; }
+      ENV_NAME="$2"
+      ENV_EXPLICIT=1
+      shift 2
+      ;;
+    --env=*|--profile=*)
+      ENV_NAME="${1#*=}"
+      ENV_EXPLICIT=1
+      shift
+      ;;
     --build)
       BUILD=1
       shift
       ;;
-    --app-key)
-      [[ $# -ge 2 ]] || { echo "--app-key 缺少值" >&2; exit 2; }
-      export UPLOAD_APP_KEY="$2"
-      shift 2
-      ;;
-    --app-secret)
-      [[ $# -ge 2 ]] || { echo "--app-secret 缺少值" >&2; exit 2; }
-      export UPLOAD_APP_SECRET="$2"
-      shift 2
-      ;;
     --help|-h)
-      sed -n '2,8p' "$0"
+      sed -n '2,16p' "$0"
       exit 0
-      ;;
-    --server.port=*)
-      PORT="${1#--server.port=}"
-      PASSTHROUGH+=("$1")
-      shift
-      ;;
-    --server.port)
-      [[ $# -ge 2 ]] || { echo "--server.port 缺少值" >&2; exit 2; }
-      PORT="$2"
-      PASSTHROUGH+=("$1" "$2")
-      shift 2
       ;;
     *)
       PASSTHROUGH+=("$1")
@@ -51,31 +48,91 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 端口被占用时尽早给出可操作提示，避免客户端只看到「网络错误」。
+# 先确定环境，再加载对应 env 配置文件：
+# env.local.<env> → env.<env> → env.local → env（后者覆盖前者，详见 scripts/env.sh）。
+export SCOP_FTP_ENV="$ENV_NAME"
+source "$PROJECT_ROOT/scripts/env.sh"
+cd "$PROJECT_ROOT"
+
+RESOURCES="$PROJECT_ROOT/server/src/main/resources"
+ENV_FILE="$RESOURCES/application-${ENV_NAME}.yml"
+if [[ -f "$ENV_FILE" ]]; then
+  CONFIG_FILE="$ENV_FILE"
+  ENV_LABEL="${ENV_NAME}（application-${ENV_NAME}.yml）"
+else
+  if [[ "$ENV_EXPLICIT" == "1" ]]; then
+    echo "找不到环境配置：$ENV_FILE" >&2
+    AVAILABLE="$(cd "$RESOURCES" && ls application-*.yml 2>/dev/null | grep -v 'application-test.yml' | sed -e 's/^application-//' -e 's/\.yml$//' | tr '\n' ' ' || true)"
+    echo "可用环境：${AVAILABLE:-（无，直接使用 application.yml 默认值）}" >&2
+    exit 2
+  fi
+  CONFIG_FILE="$RESOURCES/application.yml"
+  ENV_LABEL="${ENV_NAME}（未找到 application-${ENV_NAME}.yml，使用 application.yml 默认值）"
+fi
+
+# 端口只用于启动前的占用检查与健康检查提示，真正端口以配置文件为准
+PORT="$(awk '
+  /^server:[[:space:]]*$/ { in_server = 1; next }
+  in_server && /^[^[:space:]#]/ { in_server = 0 }
+  in_server && /^[[:space:]]+port:[[:space:]]*/ { print $2; exit }
+' "$CONFIG_FILE" | tr -d '"' || true)"
+if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
+  PORT="${SERVER_PORT:-8080}"
+fi
+
+# 命令行显式指定端口时以命令行为准
+if [[ ${#PASSTHROUGH[@]} -gt 0 ]]; then
+  for arg in "${PASSTHROUGH[@]}"; do
+    case "$arg" in
+      --server.port=*) PORT="${arg#--server.port=}" ;;
+    esac
+  done
+fi
+
 if command -v lsof >/dev/null 2>&1; then
   PORT_LISTENERS="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
   if [[ -n "$PORT_LISTENERS" ]]; then
-    echo "端口 ${PORT} 已被占用，服务端无法正常提供接口：" >&2
+    echo "端口 ${PORT} 已被占用，环境 ${ENV_NAME} 无法正常提供接口：" >&2
     echo "$PORT_LISTENERS" >&2
     echo "" >&2
-    echo "请释放该端口，或换一个端口启动：" >&2
-    echo "  SERVER_PORT=8081 ./scripts/run-server.sh" >&2
-    echo "  然后把客户端「设置 → 服务器地址」改成 http://127.0.0.1:8081" >&2
+    echo "换端口：改 $CONFIG_FILE 里的 server.port，或临时加 --server.port=8081" >&2
     exit 1
   fi
 fi
 
 JAR="$(ls -1 server/target/ScopeFTP-server-*.jar 2>/dev/null | grep -v original | head -n1 || true)"
-if [[ "$BUILD" == "1" || -z "$JAR" ]]; then
+build_jar() {
   echo "==> 构建服务端 Jar"
   "$PROJECT_ROOT/scripts/mvn.sh" -f server/pom.xml -DskipTests package
   JAR="$(ls -1 server/target/ScopeFTP-server-*.jar | grep -v original | head -n1)"
+}
+if [[ "$BUILD" == "1" || -z "$JAR" ]]; then
+  build_jar
+elif [[ -n "$JAR" ]]; then
+  # Jar 不含源码里的配置文件，新增/修改 application*.yml 后必须重新打包；
+  # 否则 Spring 找不到 profile 会静默回退到 application.yml + 代码默认值（端口/目录全错）。
+  NEWER_ENV_FILE="$(find "$RESOURCES" -maxdepth 1 -name 'application*.yml' -newer "$JAR" -print -quit 2>/dev/null || true)"
+  if [[ -n "$NEWER_ENV_FILE" ]]; then
+    echo "==> 配置文件比 Jar 新（$(basename "$NEWER_ENV_FILE")），自动重新打包"
+    build_jar
+  fi
 fi
 
-echo "==> 启动：${JAR}（Ctrl+C 停止）"
-echo "    AppKey：${UPLOAD_APP_KEY:-内置默认值}"
-echo "    健康检查：http://127.0.0.1:${PORT}/api/health"
-if [[ ${#PASSTHROUGH[@]} -gt 0 ]]; then
-  exec java ${JAVA_OPTS:--Xms256m -Xmx512m} -jar "$JAR" "${PASSTHROUGH[@]}"
+echo "==> 启动：${JAR}"
+echo "    环境：${ENV_LABEL}"
+HAS_APP_KEY=0
+for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
+  case "$arg" in
+    --app-key|--app-key=*) HAS_APP_KEY=1 ;;
+  esac
+done
+if [[ "$HAS_APP_KEY" -eq 1 ]]; then
+  echo "    AppKey：命令行传入"
+else
+  echo "    AppKey：未设置（必须用 --app-key 指定，否则启动失败）"
 fi
-exec java ${JAVA_OPTS:--Xms256m -Xmx512m} -jar "$JAR"
+echo "    健康检查：curl -H 'X-Device-Mac: 02:00:00:00:00:01' http://127.0.0.1:${PORT}/api/health"
+if [[ ${#PASSTHROUGH[@]} -gt 0 ]]; then
+  exec java ${JAVA_OPTS:--Xms256m -Xmx512m} -jar "$JAR" "--spring.profiles.active=${ENV_NAME}" "${PASSTHROUGH[@]}"
+fi
+exec java ${JAVA_OPTS:--Xms256m -Xmx512m} -jar "$JAR" "--spring.profiles.active=${ENV_NAME}"

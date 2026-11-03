@@ -9,8 +9,12 @@
 # remote 模式需要的环境变量（可写在 deploy/.env.deploy 中）：
 #   SERVER_HOST=1.2.3.4
 #   SERVER_USER=root
-#   SERVER_PORT=22
+#   SERVER_PORT=22                 # SSH 端口
 #   REMOTE_DIR=/opt/scop-ftp
+#   SERVER_PROFILE=xiaoshan        # 环境名（jar 内 application-<env>.yml），默认 xiaoshan
+#   APP_PORT=8080                  # 服务端端口，用于部署后的健康检查
+#   REMOTE_JAVA_HOME=/opt/jdk-21   # 可选：服务器上要用的 JDK 21 路径（多版本时指定，
+#                                  #       不填则用系统的 /usr/bin/java）
 #   UPLOAD_APP_KEY=demo-app
 #   UPLOAD_APP_SECRET=请改成足够长的随机串
 #
@@ -38,6 +42,9 @@ deploy_remote() {
   : "${SERVER_USER:?请设置 SERVER_USER}"
   : "${REMOTE_DIR:?请设置 REMOTE_DIR}"
   SERVER_PORT="${SERVER_PORT:-22}"
+  SERVER_PROFILE="${SERVER_PROFILE:-xiaoshan}"
+  APP_PORT="${APP_PORT:-8080}"
+  REMOTE_JAVA_HOME="${REMOTE_JAVA_HOME:-}"
 
   if [[ -n "${JAR_PATH:-}" ]]; then
     JAR="$JAR_PATH"
@@ -61,19 +68,21 @@ if [[ -f app.jar ]]; then cp app.jar app.jar.bak; fi
 mv app.jar.new app.jar
 umask 077
 cat > scop-ftp.env <<'ENVEOF'
+# 环境配置在 jar 内 application-<env>.yml；这里只放环境选择、JDK 与凭证
+SPRING_PROFILES_ACTIVE=${SERVER_PROFILE}
+# 服务器有多个 Java 版本时指定 JDK 21 路径；为空则用 /usr/bin/java
+JAVA_HOME="${REMOTE_JAVA_HOME}"
 UPLOAD_APP_KEY=${UPLOAD_APP_KEY:-demo-app}
 UPLOAD_APP_SECRET=${UPLOAD_APP_SECRET}
-UPLOAD_DEVICE_BINDING_ENABLED=${UPLOAD_DEVICE_BINDING_ENABLED:-true}
-UPLOAD_MAX_FILE_SIZE=${UPLOAD_MAX_FILE_SIZE:-209715200}
-UPLOAD_STORAGE_ROOTS=${UPLOAD_STORAGE_ROOTS:-default=/opt/scop-ftp/data}
+JAVA_OPTS=-Xms256m -Xmx512m
 ENVEOF
 chmod 600 scop-ftp.env
 sudo systemctl restart scop-ftp || true
 sleep 3
-curl -fsS http://127.0.0.1:8080/api/health || (sudo journalctl -u scop-ftp -n 50 --no-pager; exit 1)
+curl -fsS -H 'X-Device-Mac: 02:00:00:00:00:01' http://127.0.0.1:${APP_PORT}/api/health || (sudo journalctl -u scop-ftp -n 50 --no-pager; exit 1)
 echo
 EOF
-  echo "==> 部署完成：http://${SERVER_HOST}:8080/api/health"
+  echo "==> 部署完成：环境 ${SERVER_PROFILE}，JDK=${REMOTE_JAVA_HOME:-系统默认 /usr/bin/java}，健康检查 http://${SERVER_HOST}:${APP_PORT}/api/health"
 }
 
 deploy_docker() {
@@ -82,7 +91,7 @@ deploy_docker() {
   [[ -f .env ]] || { echo "缺少 deploy/.env，请先 cp deploy/.env.example deploy/.env 并修改"; exit 1; }
   docker compose up -d --build
   docker compose ps
-  echo "==> 健康检查：curl http://127.0.0.1:${SERVER_PORT:-8080}/api/health"
+  echo "==> 健康检查：curl -H 'X-Device-Mac: 02:00:00:00:00:01' http://127.0.0.1:${SERVER_PORT:-8080}/api/health"
 }
 
 case "$CMD" in

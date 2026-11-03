@@ -4,7 +4,7 @@
  *
  * 覆盖：健康检查 → 签名校验（正确/错误/过期/重放）→ 设备激活 → 上传（含中文文件名）
  *       → 篡改哈希被拒 / 任意类型允许 → 列表 → 下载并校验 SHA-256 → 删除
- *       → FTP 式目录浏览：隐藏 .upload-meta、上传到子目录、重名改名、按路径下载/删除、越界拒绝
+ *       → FTP 式目录浏览：隐藏 .upload-meta、上传到子目录、重名改名、按路径下载/删除（含 recursive 递归删除非空目录与元数据清理）、越界拒绝
  *       → 分片上传（init/chunk/status/complete、乱序补传、缺片 40000、SHA 不符 40001、取消）
  *       → 根目录递归搜索（嵌套命中、忽略大小写、隐藏 .upload-meta、非法 keyword）
  *       → 多存储根：roots 列表、双根隔离上传/删除、跨根路径拒绝、搜索按根隔离（需 E2E_ROOTS）
@@ -32,6 +32,9 @@ const APP_KEY = process.env.APP_KEY || 'demo-app';
 const APP_SECRET = process.env.APP_SECRET || 'demo-secret-please-change-32-bytes-min';
 // 固定测试设备号：服务端开启设备绑定后，重复跑测试不会因设备变化被 403
 const DEVICE_ID = process.env.DEVICE_ID || 'e2e00000-0000-4000-8000-000000000001';
+// 服务端要求所有 /api/** 请求都带 X-Device-Mac（规范化大写冒号格式），缺失/非法会被拉黑。
+// 测试统一使用固定的合法 MAC，避免依赖跑测试机器的真实网卡。
+const DEVICE_MAC = '02:00:00:00:00:01';
 const DEVICE_NAME = 'e2e 自动化测试设备';
 // 服务端存储根目录本机绝对路径（用于创建子目录 / 校验落盘位置；可选）
 const E2E_ROOT = process.env.E2E_STORAGE_ROOT;
@@ -105,7 +108,7 @@ function signedHeaders({ method, path, query = '', payloadHash = EMPTY_SHA256, t
 
 async function api(method, path, opts = {}) {
   const { query = '', json, form, raw, timestamp, nonceValue, secret, appKey, noSign = false, hashOverride } = opts;
-  const headers = {};
+  const headers = { 'X-Device-Mac': DEVICE_MAC };
   let body;
 
   let payloadHash = EMPTY_SHA256;
@@ -340,6 +343,7 @@ async function main() {
         'X-Nonce': nonceVal,
         'X-Signature': signature,
         'X-Device-Id': crypto.randomUUID(),
+        'X-Device-Mac': DEVICE_MAC,
         'X-Content-Sha256': contentSha,
       },
       body: form,
@@ -711,7 +715,9 @@ async function main() {
     const dir = await api('GET', '/api/files/dir', { query: 'path=docs' });
     const names = (dir.data.data.entries || []).map((e) => e.name);
     assert(names.includes(newName) && !names.includes(oldName), '目录条目已更新');
-    const dl = await fetch(`${BASE_URL}/api/files/download?path=${encodeURIComponent(`docs/${newName}`)}`);
+    const dl = await fetch(`${BASE_URL}/api/files/download?path=${encodeURIComponent(`docs/${newName}`)}`, {
+      headers: { 'X-Device-Mac': DEVICE_MAC },
+    });
     assertEqual(dl.status, 401, '未签名下载应 401');
     const signed = await api('GET', '/api/files/download', { query: `path=${encodeURIComponent(`docs/${newName}`)}` });
     assertEqual(signed.status, 200, '新路径下载 HTTP');
@@ -799,6 +805,53 @@ async function main() {
     assertCode(res, 40000, '非空目录');
     assert(fs.existsSync(path.join(nonEmpty, 'keep.txt')), '非空目录内容保留');
     fs.rmSync(nonEmpty, { recursive: true, force: true });
+  });
+
+  await test('删除：recursive=true 递归删除非空目录、元数据联动清理', async () => {
+    if (!E2E_ROOT) {
+      console.log('      （未设置 E2E_STORAGE_ROOT，跳过）');
+      return;
+    }
+    const stamp = Date.now();
+    const dirName = `e2e递归目录-${stamp}`;
+    const fileName = `e2e递归元数据-${stamp}.txt`;
+    const relDir = `docs/${dirName}`;
+    const dirPath = path.join(E2E_ROOT, 'docs', dirName);
+    fs.mkdirSync(path.join(dirPath, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(dirPath, 'sub', 'inner.txt'), 'inner');
+
+    // 用上传接口在待删目录内产生一条文件元数据（带 dir=docs/<dirName>）
+    const content = Buffer.from(`recursive delete e2e ${stamp}\n`, 'utf8');
+    const form = new FormData();
+    form.append('name', fileName);
+    form.append('file', new Blob([content], { type: 'text/plain' }), fileName);
+    const up = await api('POST', '/api/files/upload', {
+      form: { body: form, contentSha256: sha256Hex(content) },
+      query: `dir=${encodeURIComponent(relDir)}`,
+    });
+    assertEqual(up.status, 200, 'upload HTTP');
+    assertCode(up, 0, 'upload 到待删目录');
+    assert(fs.existsSync(path.join(dirPath, fileName)), '上传文件已落在待删目录内');
+
+    // 默认（不带 recursive）非空目录仍 40000 且内容保留
+    let res = await api('DELETE', '/api/files', { query: `path=${encodeURIComponent(relDir)}` });
+    assertEqual(res.status, 400, '默认删除 HTTP');
+    assertCode(res, 40000, '默认删除非空目录');
+    assert(res.data.message.includes('目录非空'), 'message 含「目录非空」');
+    assert(fs.existsSync(path.join(dirPath, 'sub', 'inner.txt')), '默认删除后内容保留');
+
+    // recursive=true：一次性删除目录及其全部内容
+    res = await api('DELETE', '/api/files', { query: `path=${encodeURIComponent(relDir)}&recursive=true` });
+    assertEqual(res.status, 200, 'recursive 删除 HTTP');
+    assertCode(res, 0, 'recursive 删除');
+    assertEqual(res.data.data.path, relDir, '返回被删目录路径');
+    assert(!fs.existsSync(dirPath), '非空目录已从磁盘删除');
+
+    // 元数据联动清理：按文件名查不到该文件
+    const list = await api('GET', '/api/files', { query: `keyword=${encodeURIComponent(fileName)}` });
+    assertEqual(list.status, 200, '列表 HTTP');
+    assertCode(list, 0, '列表查询');
+    assertEqual(list.data.data.total, 0, '目录内文件元数据已清理（total 0）');
   });
 
   // 汇总

@@ -30,7 +30,22 @@ const HEADER_TIMESTAMP: &str = "X-Timestamp";
 const HEADER_NONCE: &str = "X-Nonce";
 const HEADER_SIGNATURE: &str = "X-Signature";
 const HEADER_DEVICE_ID: &str = "X-Device-Id";
+const HEADER_DEVICE_MAC: &str = "X-Device-Mac";
 const HEADER_CONTENT_SHA256: &str = "X-Content-Sha256";
+
+/// 取本机物理地址（`X-Device-Mac` 的值）。
+///
+/// 服务端会把缺失/非法 MAC 的客户端拉黑，因此读不到时直接阻断请求，
+/// 绝不发出不带该请求头的请求。该请求头不参与签名（不改 canonicalString）。
+fn require_device_mac() -> Result<&'static str, String> {
+    let mac = crate::mac::device_mac();
+    if mac.is_empty() {
+        return Err(
+            "无法识别本机物理地址（MAC），已阻止请求：请检查网络接口".to_string(),
+        );
+    }
+    Ok(mac)
+}
 
 /// 分片上传服务端返回的默认分片大小（8MB）；以 `init` 返回值为准。
 pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
@@ -816,6 +831,8 @@ impl Api {
         payload_hash: &str,
         extra: &[(&'static str, String)],
     ) -> Result<HeaderMap, String> {
+        // 先确认能拿到 MAC：读不到就不签名、不发请求（服务端会拉黑缺 MAC 的客户端）。
+        let mac = require_device_mac()?;
         let timestamp = now_millis();
         let nonce = Uuid::new_v4().to_string();
         let signature = signer::sign_request(
@@ -843,6 +860,7 @@ impl Api {
         if !self.device_id().is_empty() {
             insert(HEADER_DEVICE_ID, self.device_id())?;
         }
+        insert(HEADER_DEVICE_MAC, mac)?;
         for (name, value) in extra {
             insert(name, value)?;
         }
@@ -964,11 +982,15 @@ impl Api {
     }
 
     /// 健康检查（`GET /api/health`，免签名），用于区分「地址不通」与「签名/授权错误」。
+    ///
+    /// 服务端要求 `/api/**`（含 health）携带 `X-Device-Mac`，这里先取 MAC 再发请求。
     pub async fn health(&self) -> Result<Value, String> {
+        let mac = require_device_mac()?;
         let url = format!("{}/api/health", self.base_url()?);
         let response = self
             .http
             .get(url)
+            .header(HEADER_DEVICE_MAC, mac)
             .timeout(Duration::from_secs(8))
             .send()
             .await
@@ -1450,9 +1472,17 @@ impl Api {
         self.send_void(Method::DELETE, &path).await
     }
 
-    /// `DELETE /api/files?path=`：按相对路径删除文件（FTP 式目录浏览），
+    /// `DELETE /api/files?path=`：按相对路径删除文件/目录（FTP 式目录浏览），
     /// 服务端保证路径限制在存储根目录内。
-    pub async fn delete_server_file(&self, path: &str, root: Option<&str>) -> Result<(), String> {
+    ///
+    /// `recursive=true` 时额外携带 `recursive=true`，服务端一次性递归删除非空目录
+    /// （默认 false，保持与服务端一致的「非空目录拒绝删除」旧行为）。
+    pub async fn delete_server_file(
+        &self,
+        path: &str,
+        root: Option<&str>,
+        recursive: bool,
+    ) -> Result<(), String> {
         self.require_configured()?;
         let path = path.trim();
         if path.is_empty() {
@@ -1462,6 +1492,9 @@ impl Api {
         push_query(&mut query, "path", path);
         if let Some(root) = normalize_root(root) {
             push_query(&mut query, "root", &root);
+        }
+        if recursive {
+            push_query(&mut query, "recursive", "true");
         }
         let target = with_query("/api/files", &query);
         self.send_void(Method::DELETE, &target).await
@@ -2332,11 +2365,11 @@ mod tests {
                 .expect("执行终端命令");
             println!("[live audit terminal] {terminal:?}");
 
-            api.delete_server_file(&unique, None)
+            api.delete_server_file(&unique, None, false)
                 .await
                 .expect("删除测试文件");
             let delete_error = api
-                .delete_server_file(&unique, None)
+                .delete_server_file(&unique, None, false)
                 .await
                 .expect_err("再次删除应 404");
             println!("[live audit delete error] {delete_error}");

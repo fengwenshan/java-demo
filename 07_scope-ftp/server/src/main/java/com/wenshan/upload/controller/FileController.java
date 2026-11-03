@@ -229,15 +229,21 @@ public class FileController {
     }
 
     /**
-     * 浏览视图按路径删除：{@code path} 相对 root，仅删除普通文件（不删目录/内部目录/越界），
-     * 并联动删除元数据中 storedPath 完全相同的记录。
+     * 浏览视图按路径删除：{@code path} 相对 root。
+     *
+     * <p>默认 {@code recursive=false}：只删除普通文件（并联动删除元数据中 storedPath 完全相同的记录）
+     * 或空目录，非空目录 → 40000 且不删任何内容。</p>
+     *
+     * <p>{@code recursive=true}：目录递归删除整棵子树（不跟随符号链接），成功后清理该目录下所有文件元数据；
+     * 若目录内包含其他已配置存储根 → 40000 且不删任何内容。</p>
      */
     @DeleteMapping
     public ApiResponse<PathDeleteResult> deleteByPath(
             @RequestAttribute(SignatureFilter.ATTR_APP_KEY) String appKey,
             @RequestParam(name = "root", required = false) String root,
-            @RequestParam(name = "path", required = false) String path) {
-        return ApiResponse.ok(fileService.deleteByPath(appKey, root, requirePath(path)));
+            @RequestParam(name = "path", required = false) String path,
+            @RequestParam(name = "recursive", defaultValue = "false") boolean recursive) {
+        return ApiResponse.ok(fileService.deleteByPath(appKey, root, requirePath(path), recursive));
     }
 
     /**

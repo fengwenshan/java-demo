@@ -32,4 +32,6 @@ VOLUME ["/app/data", "/app/logs"]
 
 # JAVA_OPTS 由 docker-compose / 运行时注入
 ENV JAVA_OPTS="-Xms256m -Xmx512m"
+# 默认激活 docker profile：jar 内若有 application-docker.yml 则用它，否则用 application.yml 默认值
+ENV SPRING_PROFILES_ACTIVE=docker
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

@@ -9,6 +9,7 @@ mod api;
 mod builtin;
 mod commands;
 mod config;
+mod mac;
 mod signer;
 mod uploads;
 
@@ -74,6 +75,7 @@ pub fn run() {
             commands::set_active_server,
             commands::file_info,
             commands::verify_connection,
+            commands::verify_connection_preview,
             commands::activate,
             commands::list_storage_roots,
             commands::upload_file,

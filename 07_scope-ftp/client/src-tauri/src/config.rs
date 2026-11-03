@@ -221,8 +221,10 @@ impl AppConfig {
         self.save_server_with_credentials(id, name, server_url, device_name, None, None)
     }
 
-    /// 带可选凭据的保存：供 Tauri 命令使用。
+    /// 带可选凭据的保存：供 Tauri 命令使用（IPC 层会先调用
+    /// [`validate_required_credentials`] 强制 AppKey/AppSecret 必填）。
     ///
+    /// 本方法保留旧配置迁移所需的宽松语义：
     /// - `app_key == None`：编辑时保留原自定义 AppKey；新建时使用内置值；
     /// - `app_key == Some("")`：清除自定义 AppKey，回退内置值；
     /// - `app_secret == None`：编辑时保留原自定义 secret；新建时使用内置值；
@@ -511,7 +513,33 @@ pub fn persist(path: &Path, config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// 校验可选凭据：允许空串（回退内置值），否则去首尾空白并限制长度。
+/// 规范化并校验可选凭据：允许空串（旧配置迁移用），否则去首尾空白并限制长度。
+/// 新保存路径由 [`validate_required_credentials`] 保证非空。
+/// 保存服务器时的必填凭证校验：服务端启动时必须显式指定 AppKey/AppSecret，
+/// 客户端不再回退内置默认值（Tauri IPC 保存前调用）。
+///
+/// - 新建（`id` 为空）：AppKey 与 AppSecret 都必须非空；
+/// - 编辑：AppKey 必填；`app_secret == None` 表示沿用已保存的 secret。
+pub fn validate_required_credentials(
+    id: Option<&str>,
+    app_key: Option<&str>,
+    app_secret: Option<&str>,
+) -> Result<(), String> {
+    let is_new = id.map(str::trim).filter(|value| !value.is_empty()).is_none();
+    let missing_app_key = app_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none();
+    if missing_app_key {
+        return Err("AppKey 必填：请填写与服务端启动时一致的 AppKey".to_string());
+    }
+    match app_secret.map(str::trim) {
+        Some("") => Err("AppSecret 必填：请填写与服务端启动时一致的 AppSecret".to_string()),
+        None if is_new => Err("AppSecret 必填：请填写与服务端启动时一致的 AppSecret".to_string()),
+        _ => Ok(()),
+    }
+}
+
 fn normalize_credential(input: &str, label: &str, max_chars: usize) -> Result<String, String> {
     let value = input.trim();
     if value.chars().count() > max_chars {
@@ -955,5 +983,21 @@ mod tests {
         assert!(!cleared.has_custom_secret());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_requires_app_key_and_app_secret() {
+        // 新建服务器：AppKey / AppSecret 都必须填写（服务端启动时必须指定，没有内置默认值）。
+        assert!(validate_required_credentials(None, None, None).is_err());
+        assert!(validate_required_credentials(None, Some("   "), Some("secret")).is_err());
+        assert!(validate_required_credentials(None, Some("key"), None).is_err());
+        assert!(validate_required_credentials(None, Some("key"), Some(" ")).is_err());
+        assert!(validate_required_credentials(None, Some("key"), Some("secret")).is_ok());
+
+        // 编辑服务器：AppKey 必填；AppSecret 传 None 表示沿用已保存值。
+        assert!(validate_required_credentials(Some("s1"), None, None).is_err());
+        assert!(validate_required_credentials(Some("s1"), Some("key"), None).is_ok());
+        assert!(validate_required_credentials(Some("s1"), Some("key"), Some("  ")).is_err());
+        assert!(validate_required_credentials(Some("s1"), Some("key"), Some("secret")).is_ok());
     }
 }

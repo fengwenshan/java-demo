@@ -386,17 +386,18 @@ body {
   margin-bottom: 12px;
 }
 
+/* 路径过长时整段换行显示（不裁剪、不省略），保证当前目录始终可见。 */
 .browser-path {
   display: flex;
   flex: 0 1 auto;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   min-width: 0;
-  overflow: hidden;
 }
 
 .browser-path-icon {
   flex: none;
+  margin-top: 5px;
   color: rgba(0, 0, 0, 0.45);
   font-size: 14px;
 }
@@ -404,27 +405,30 @@ body {
 .browser-breadcrumb {
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
+  white-space: normal;
 }
 
 .browser-breadcrumb ol {
-  flex-wrap: nowrap;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 2px;
   min-width: 0;
-  overflow: hidden;
   margin: 0;
+  white-space: normal;
 }
 
 .browser-breadcrumb li {
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
 }
 
-/* 路径过长时只省略最后一段（可点击面包屑能力保留）。 */
-.browser-breadcrumb li:last-child {
-  display: inline-block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  vertical-align: bottom;
+/* 单段目录名很长时允许在段内换行，而不是挤出容器。 */
+.browser-breadcrumb .ant-breadcrumb-link,
+.browser-breadcrumb .ant-breadcrumb-separator {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .toolbar-icon-active.ant-btn {
@@ -1402,16 +1406,37 @@ body {
 
 .move-dialog-location {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   min-width: 0;
-  overflow: hidden;
 }
 
 .move-dialog-breadcrumb {
+  flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
+  white-space: normal;
+}
+
+.move-dialog-breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 2px;
+  min-width: 0;
+  margin: 0;
+  white-space: normal;
+}
+
+.move-dialog-breadcrumb li {
+  min-width: 0;
+  white-space: normal;
+}
+
+.move-dialog-breadcrumb .ant-breadcrumb-link,
+.move-dialog-breadcrumb .ant-breadcrumb-separator {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .move-dialog-list {

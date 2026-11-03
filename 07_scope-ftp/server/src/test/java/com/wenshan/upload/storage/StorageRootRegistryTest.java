@@ -22,7 +22,7 @@ class StorageRootRegistryTest {
     Path tempDir;
 
     @Test
-    void envSpecCreatesConfiguredRootsWithFirstAsDefault() {
+    void simpleSpecCreatesConfiguredRootsWithFirstAsDefault() {
         Path rootA = tempDir.resolve("root-a");
         Path rootB = tempDir.resolve("root-b");
 
@@ -49,12 +49,11 @@ class StorageRootRegistryTest {
         assertThatThrownBy(() -> new StorageRootRegistry(properties, null))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("未配置存储根")
-                .hasMessageContaining("app.storage.roots[]")
-                .hasMessageContaining(StorageRootRegistry.ENV_ROOTS);
+                .hasMessageContaining("app.storage.roots[]");
     }
 
     @Test
-    void propertiesRootsAreUsedWhenEnvIsAbsent() {
+    void propertiesRootsAreUsedWhenNoSpec() {
         Path rootA = tempDir.resolve("from-yaml-a");
         Path rootB = tempDir.resolve("from-yaml-b");
         AppProperties properties = new AppProperties();
@@ -71,7 +70,7 @@ class StorageRootRegistryTest {
     }
 
     @Test
-    void envSpecOverridesPropertiesRoots() {
+    void specOverridesPropertiesRootsForTests() {
         Path yamlRoot = tempDir.resolve("yaml-root");
         Path envRoot = tempDir.resolve("env-root");
         AppProperties properties = new AppProperties();
@@ -126,13 +125,13 @@ class StorageRootRegistryTest {
         assertThatThrownBy(() -> new StorageRootRegistry(new AppProperties(), "a=" + file))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("不是目录");
-        // 环境变量格式非法 / 空 path
+        // 简写格式非法 / 空 path
         assertThatThrownBy(() -> new StorageRootRegistry(new AppProperties(), "no-equals-sign"))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining(StorageRootRegistry.ENV_ROOTS);
+                .hasMessageContaining("id=path");
         assertThatThrownBy(() -> new StorageRootRegistry(new AppProperties(), "a="))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining(StorageRootRegistry.ENV_ROOTS);
+                .hasMessageContaining("id=path");
     }
 
     @Test

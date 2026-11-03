@@ -20,9 +20,12 @@ import java.io.IOException;
 import java.net.URLConnection;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -220,10 +223,20 @@ public class FileService {
     }
 
     /**
-     * 浏览视图按路径删除：指定根内普通文件（删除并联动清理 storedPath 完全相同的记录）或空目录；
-     * 非空目录 → 40000（不删任何内容），根目录本身/内部元数据/越界/跨根由路径校验拦截（40000）。
+     * 浏览视图按路径删除：指定根内普通文件、空目录，或 {@code recursive=true} 时的整棵目录树。
+     *
+     * <p>默认（{@code recursive=false}）行为保持不变：普通文件删除并联动清理 storedPath 完全相同的记录；
+     * 目录只允许删除空目录，非空目录 → 40000（不删任何内容）。</p>
+     *
+     * <p>{@code recursive=true} 时目录用 {@link Files#walkFileTree} 一次遍历递归删除（不跟随符号链接，
+     * 符号链接只删除链接本身），成功后清理该根元数据中 storedPath 以「目录路径 + /」开头的全部记录；
+     * 删除前先做嵌套存储根防护：目标目录内若包含另一个已配置存储根（其真实路径等于或位于目标目录下），
+     * → 40000「目录包含其他存储根，不能删除」且不删除任何内容。</p>
+     *
+     * <p>根目录本身/内部元数据 {@code .upload-meta}/绝对路径/{@code ..}/跨根/symbolic link 组件
+     * 仍由路径校验拦截（40000）；递归删除中途 IO 失败 → 50000（部分内容可能已删除）。</p>
      */
-    public PathDeleteResult deleteByPath(String appKey, String rootParam, String relativePath) {
+    public PathDeleteResult deleteByPath(String appKey, String rootParam, String relativePath, boolean recursive) {
         StorageRoot root = rootRegistry.requireRoot(rootParam);
         Path path = storageService.resolve(root.paths(), relativePath);
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
@@ -231,6 +244,13 @@ public class FileService {
         }
         String canonicalPath = storageService.relativize(root.paths(), path);
         if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+            if (recursive) {
+                // 先做嵌套存储根防护（命中时不删任何内容），再一次性递归删除并清理元数据
+                rejectDeletingNestedRoot(root, path);
+                deleteDirectoryTree(path);
+                removeMetadataUnder(root, canonicalPath);
+                return new PathDeleteResult(canonicalPath);
+            }
             // 只允许删除空目录：目录里没有文件/子目录才是空（嵌套的其他存储根含 .upload-meta，会被判非空）
             try (var children = Files.newDirectoryStream(path)) {
                 if (children.iterator().hasNext()) {
@@ -391,6 +411,66 @@ public class FileService {
                 throw new BizException(ErrorCode.BAD_REQUEST,
                         "不能重命名其他存储根所在目录: " + other.id());
             }
+        }
+    }
+
+    /**
+     * 递归删除前的嵌套存储根防护：目标目录内若包含另一个已配置存储根
+     * （其真实路径等于目标真实路径，或以目标真实路径为前缀），递归删除会连同该根的
+     * {@code .upload-meta} 与用户数据一起删掉 → 40000，且不删除任何内容。
+     */
+    private void rejectDeletingNestedRoot(StorageRoot currentRoot, Path directory) {
+        Path targetReal;
+        try {
+            targetReal = directory.toRealPath();
+        } catch (IOException e) {
+            throw new BizException(ErrorCode.INTERNAL_ERROR, "目录校验失败");
+        }
+        for (StorageRoot other : rootRegistry.roots()) {
+            if (other.id().equals(currentRoot.id())) {
+                continue;
+            }
+            Path otherReal = other.paths().rootReal();
+            if (otherReal.equals(targetReal) || otherReal.startsWith(targetReal)) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "目录包含其他存储根，不能删除");
+            }
+        }
+    }
+
+    /**
+     * 一次性递归删除目录树：不跟随符号链接（{@code walkFileTree} 默认不 FOLLOW_LINKS），
+     * 符号链接在 {@code visitFile} 中只删除链接本身，绝不会删到链接指向的外部目标。
+     * 中途 IO 失败时已有部分内容被删除，按契约返回 50000 与明确的中文提示。
+     */
+    private void deleteDirectoryTree(Path directory) {
+        try {
+            Files.walkFileTree(directory, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    // symlink 也走这里：只删链接本身，不进入链接目标
+                    Files.deleteIfExists(file);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                    if (exc != null) {
+                        throw exc;
+                    }
+                    Files.deleteIfExists(dir);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            throw new BizException(ErrorCode.INTERNAL_ERROR, "目录删除失败（部分内容可能已删除）");
+        }
+    }
+
+    /** 递归删除成功后按 storedPath 前缀清理该根元数据（与目录移动的 filesAtOrUnder 语义一致）。 */
+    private void removeMetadataUnder(StorageRoot root, String canonicalDirectory) {
+        List<FileRecord> records = root.metaStore().filesAtOrUnder(canonicalDirectory, true);
+        if (!records.isEmpty()) {
+            root.metaStore().removeByIds(records.stream().map(FileRecord::id).toList());
         }
     }
 
