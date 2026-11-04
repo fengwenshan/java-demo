@@ -12,7 +12,8 @@ from pathlib import Path
 PLATFORMS = {
     "darwin-aarch64": ("ScopeFTP-macos-arm64", "aarch64", "app.tar.gz"),
     "darwin-x86_64": ("ScopeFTP-macos-x64", "x64", "app.tar.gz"),
-    "windows-x86_64": ("ScopeFTP-client-windows-x64", "x64", "nsis.zip"),
+    # Windows 的 Tauri updater 产物就是 NSIS 安装包本身，签名文件是同名 .exe.sig。
+    "windows-x86_64": ("ScopeFTP-client-windows-x64", "x64", "setup.exe"),
 }
 
 
@@ -38,7 +39,10 @@ def main() -> None:
         if not signature.is_file():
             raise SystemExit(f"{key}: missing signature file {signature}")
 
-        filename = f"ScopeFTP_{args.version}_{arch}.{suffix}"
+        if key == "windows-x86_64":
+            filename = f"ScopeFTP_{args.version}_{arch}-setup.exe"
+        else:
+            filename = f"ScopeFTP_{args.version}_{arch}.{suffix}"
         shutil.copy2(archive, args.out_dir / filename)
         shutil.copy2(signature, args.out_dir / f"{filename}.sig")
         platforms[key] = {
