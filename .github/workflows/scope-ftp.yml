@@ -263,8 +263,7 @@ jobs:
           path: |
             07_scope-ftp/client/src-tauri/target/**/release/ScopeFTP-client.exe
             07_scope-ftp/client/src-tauri/target/**/release/bundle/nsis/*.exe
-            07_scope-ftp/client/src-tauri/target/**/release/bundle/nsis/*.nsis.zip
-            07_scope-ftp/client/src-tauri/target/**/release/bundle/nsis/*.nsis.zip.sig
+            07_scope-ftp/client/src-tauri/target/**/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
 
   release:
