@@ -2,7 +2,8 @@
 # 启动服务端（本地开发）。端口/存储根等默认用 application.yml（8080、./data），
 # 若存在本地的 application-<env>.yml 环境文件则覆盖；环境文件一律不入库。
 #
-# 凭证必须显式指定：--app-key/--app-secret；缺失时服务端启动失败，没有内置默认值。
+# 凭证必须显式指定：--app-key/--app-secret；缺失时脚本会在启动前一次性提示并退出，
+# 不会先拉起 Spring 再打印长堆栈；服务端没有内置默认值。
 #
 # 用法：
 #   ./scripts/run-server.sh [--env <环境名>] [--build] [--app-key KEY] [--app-secret SECRET] [其它 Spring Boot 参数...]
@@ -70,6 +71,56 @@ else
   ENV_LABEL="${ENV_NAME}（未找到 application-${ENV_NAME}.yml，使用 application.yml 默认值）"
 fi
 
+# 启动前一次性校验凭证：不要在缺 secret 时先构建/拉起 Spring，再被长堆栈刷屏。
+# 支持命令行 `--app-key KEY --app-secret SECRET`，也支持 UPLOAD_APP_KEY /
+# UPLOAD_APP_SECRET 环境变量（Spring 启动参数优先级更高）。
+CLI_APP_KEY=""
+CLI_APP_SECRET=""
+for ((i = 0; i < ${#PASSTHROUGH[@]}; i++)); do
+  arg="${PASSTHROUGH[i]}"
+  case "$arg" in
+    --app-key)
+      next="${PASSTHROUGH[i + 1]:-}"
+      [[ "$next" == --* ]] && next=""
+      CLI_APP_KEY="$next"
+      ;;
+    --app-key=*)
+      CLI_APP_KEY="${arg#--app-key=}"
+      ;;
+    --app-secret)
+      next="${PASSTHROUGH[i + 1]:-}"
+      [[ "$next" == --* ]] && next=""
+      CLI_APP_SECRET="$next"
+      ;;
+    --app-secret=*)
+      CLI_APP_SECRET="${arg#--app-secret=}"
+      ;;
+  esac
+done
+
+APP_KEY_VALUE="${CLI_APP_KEY:-${UPLOAD_APP_KEY:-}}"
+APP_SECRET_VALUE="${CLI_APP_SECRET:-${UPLOAD_APP_SECRET:-}}"
+
+if [[ -z "$APP_KEY_VALUE" || -z "$APP_SECRET_VALUE" ]]; then
+  echo "==> 启动凭证不完整，已停止启动（不会拉起 Spring）" >&2
+  if [[ -z "$APP_KEY_VALUE" && -z "$APP_SECRET_VALUE" ]]; then
+    echo "    缺少 --app-key 和 --app-secret" >&2
+  elif [[ -z "$APP_KEY_VALUE" ]]; then
+    echo "    缺少 --app-key" >&2
+  else
+    echo "    缺少 --app-secret" >&2
+  fi
+  echo "" >&2
+  echo "请一次性提供两项（服务端没有内置默认凭证）：" >&2
+  echo "  ./scripts/run-server.sh --env ${ENV_NAME} --app-key demo-app --app-secret 'demo-secret-please-change-32-bytes'" >&2
+  echo "" >&2
+  echo "也可以使用环境变量：" >&2
+  echo "  UPLOAD_APP_KEY=demo-app UPLOAD_APP_SECRET='demo-secret-please-change-32-bytes' ./scripts/run-server.sh --env ${ENV_NAME}" >&2
+  echo "" >&2
+  echo "修改凭证后重新执行上面的命令即可；不要只传 --app-key。" >&2
+  exit 1
+fi
+
 # 端口只用于启动前的占用检查与健康检查提示，真正端口以配置文件为准
 PORT="$(awk '
   /^server:[[:space:]]*$/ { in_server = 1; next }
@@ -120,16 +171,15 @@ fi
 
 echo "==> 启动：${JAR}"
 echo "    环境：${ENV_LABEL}"
-HAS_APP_KEY=0
-for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
-  case "$arg" in
-    --app-key|--app-key=*) HAS_APP_KEY=1 ;;
-  esac
-done
-if [[ "$HAS_APP_KEY" -eq 1 ]]; then
+if [[ -n "$CLI_APP_KEY" ]]; then
   echo "    AppKey：命令行传入"
 else
-  echo "    AppKey：未设置（必须用 --app-key 指定，否则启动失败）"
+  echo "    AppKey：环境变量传入"
+fi
+if [[ -n "$CLI_APP_SECRET" ]]; then
+  echo "    AppSecret：命令行传入"
+else
+  echo "    AppSecret：环境变量传入"
 fi
 echo "    健康检查：curl -H 'X-Device-Mac: 02:00:00:00:00:01' http://127.0.0.1:${PORT}/api/health"
 if [[ ${#PASSTHROUGH[@]} -gt 0 ]]; then
