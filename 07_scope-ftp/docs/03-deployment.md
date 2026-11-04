@@ -121,7 +121,7 @@ app:
 
 ### 2.1 获取构建产物
 
-不再在本地打包。推送 `v*` tag 后由仓库根目录的 `.github/workflows/scope-ftp.yml` 构建，在 Actions 的 **ScopeFTP-server-jar** / **ScopeFTP-server-profiles** artifact 中下载 `ScopeFTP-server` Jar 或分环境 zip；普通 `main` push / PR / 手动发布 Release 不触发构建。分环境包内部固定为 `ftp-server/` + `ftp-server.jar`；CI 为区分环境把 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip`。
+不再在本地打包。推送 `v*` tag 后由仓库根目录的 `.github/workflows/scope-ftp.yml` 构建，在 Actions 的 **ScopeFTP-Server-package** artifact 中下载部署 zip；默认始终有 `ScopeFTP-Server.zip`（内部固定 `ScopeFTP-Server/` + `ScopeFTP-Server.jar` + `start.sh` + `scop-ftp.env`），私有配置齐全时额外有 `ScopeFTP-Server-xiaoshan.zip` / `ScopeFTP-Server-xihu.zip`。普通 `main` push / PR / 手动发布 Release 不触发构建。
 
 ### 2.2 上传与安装
 
@@ -131,8 +131,9 @@ sudo useradd -r -s /usr/sbin/nologin scopftp
 sudo mkdir -p /opt/scop-ftp/data
 sudo chown -R scopftp:scopftp /opt/scop-ftp
 
-# 本地（先下载 Actions 的 ScopeFTP-server-jar artifact）
-scp ScopeFTP-server-*.jar root@SERVER:/opt/scop-ftp/app.jar
+# 本地（下载 Actions 的 ScopeFTP-Server-package artifact 并解压 ScopeFTP-Server.zip）
+unzip -q ScopeFTP-Server.zip
+scp ScopeFTP-Server/ScopeFTP-Server.jar root@SERVER:/opt/scop-ftp/app.jar
 scp deploy/scop-ftp.service root@SERVER:/etc/systemd/system/
 
 # 服务器上，写环境文件（权限 600，含环境名与密钥）
@@ -186,7 +187,7 @@ scripts/env → scripts/env.local → scripts/env.<profile> → scripts/env.loca
 
 - systemd 单元通过 `/bin/sh -c` 读取环境文件里的 `JAVA_HOME`：有值就用 `$JAVA_HOME/bin/java`，没有就用 `/usr/bin/java`。
 - 分环境包里的 `start.sh` 同样读取 `scop-ftp.env` 的 `JAVA_HOME`；`JAVA_HOME` 路径不对或 Java 版本低于 21 时会**直接报错退出**，不会等到 `UnsupportedClassVersionError`。
-- 打包时 `build-server-profiles.sh` 会按上面的优先级读取该 profile 的生效配置，直接生成包内 `scop-ftp.env`（不再生成 `.env.example`），并用其中的 `JAVA_HOME` / `JAVA_OPTS` 作为 `start.sh` 的默认值。不传 profile 时生成默认包，不激活 Spring profile，直接使用 `application.yml`；产物名固定为 `release/server/ftp-server/` 和 `ftp-server.zip`，包内 Jar 固定为 `ftp-server.jar`。
+- 打包时 `build-server-profiles.sh` 会按上面的优先级读取该 profile 的生效配置，直接生成包内 `scop-ftp.env`（不再生成 `.env.example`），并用其中的 `JAVA_HOME` / `JAVA_OPTS` 作为 `start.sh` 的默认值。不传 profile 时生成默认包，不激活 Spring profile，直接使用 `application.yml`；产物名固定为 `release/server/ScopeFTP-Server/` 和 `ScopeFTP-Server.zip`，包内 Jar 固定为 `ScopeFTP-Server.jar`。
 - 验证指定是否生效：
 
   ```bash
@@ -216,9 +217,9 @@ CI 里生产配置由 GitHub Secrets 注入后再构建。本地保留自己的�
 | `UPLOAD_CLIENT_APP_KEY` / `UPLOAD_CLIENT_APP_SECRET` | 可选，客户端构建时内置的 AppKey/AppSecret |
 | `UPLOAD_CLIENT_SERVER_URL` | 可选，客户端默认服务端地址 |
 
-如果未配置两个生产 profile Secrets，CI 仍会构建 Jar（测试用例使用 `application-test.yml`），但不会生成分环境部署 zip；两个都齐全后分别构建，并把固定名 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip` 上传。
+如果未配置两个生产 profile Secrets，CI 仍会生成默认 `ScopeFTP-Server.zip`（使用 jar 内 `application.yml`），但不会生成分环境部署包；两个都齐全后会额外把固定名 `ScopeFTP-Server.zip` 复制成 `ScopeFTP-Server-xiaoshan.zip` / `ScopeFTP-Server-xihu.zip` 上传。
 
-分环境包里的 `start.sh` 已自动带 `--spring.profiles.active=<profile>`（default 包不带 profile，使用 `application.yml`），默认后台运行，日志写入包内 `logs/console.log`；解压后目录固定为 `ftp-server/`，Jar 固定为 `ftp-server.jar`：
+分环境包里的 `start.sh` 已自动带 `--spring.profiles.active=<profile>`（default 包不带 profile，使用 `application.yml`），默认后台运行，日志写入包内 `logs/console.log`；解压后目录固定为 `ScopeFTP-Server/`，Jar 固定为 `ScopeFTP-Server.jar`：
 
 ```bash
 APP_SECRET="$(openssl rand -hex 32)"
@@ -327,7 +328,7 @@ UPLOAD_APP_SECRET=请替换为随机长密钥
 ./deploy/deploy.sh remote
 ```
 
-先把 GitHub Actions 下载的 `ScopeFTP-server-*.jar` 放到 `server/target/`，或设置 `JAR_PATH` 指向该文件；脚本会 rsync 到服务器、生成 600 权限环境文件、重启 systemd 并做健康检查，不再本地打包。
+把 GitHub Actions 下载的 `ScopeFTP-Server-package` 里的 `ScopeFTP-Server.zip` 解压，将其中的 `ScopeFTP-Server/ScopeFTP-Server.jar` 放到 `server/target/`，或设置 `JAR_PATH` 指向该文件；脚本会 rsync 到服务器、生成 600 权限环境文件、重启 systemd 并做健康检查，不再本地打包。
 
 ### 2.6 多级转发（relay）部署
 
@@ -394,7 +395,7 @@ pnpm tauri dev
 cd src-tauri && cargo check && cargo test
 ```
 
-发布产物（macOS DMG / Windows 免安装 exe 与 NSIS `.exe` / 服务端 Jar 与分环境 zip）见 Actions 页面下载。
+发布产物（macOS DMG / Windows 免安装 exe 与 NSIS `.exe` / 服务端 `ScopeFTP-Server.zip` 与可选分环境 zip）见 Actions 页面下载。
 
 ### 真实服务端联调测试
 

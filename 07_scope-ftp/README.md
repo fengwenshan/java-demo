@@ -210,8 +210,8 @@ APP_KEY=my-key APP_SECRET=my-secret E2E_ROOTS="work=./work,media=./media" E2E_ST
 客户端安装包不再本地打，发布交给仓库根目录的 [`.github/workflows/scope-ftp.yml`](../.github/workflows/scope-ftp.yml)：
 
 - **只有推送 `v*` tag（如 `v1.0.0`）才触发构建**；普通 `main` push、PR、手动发布 Release 都不会触发
-- tag 构建完成后自动上传 Actions Artifacts，并创建 GitHub Release 上传服务端 Jar、分环境包和客户端安装包
-- 服务端：跑 341 个测试、打 `ScopeFTP-server` Jar；私有生产配置（萧山/西湖）由 GitHub Secrets 注入后再生成分环境包（包内固定 `ftp-server/` + `ftp-server.jar`；CI 为区分环境把 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip`）；**启动时没有凭证会失败**
+- tag 构建完成后自动上传 Actions Artifacts，并创建 GitHub Release 上传服务端部署包和客户端安装包
+- 服务端：跑测试后始终生成可部署的 `ScopeFTP-Server.zip`（包内固定 `ScopeFTP-Server/` + `ScopeFTP-Server.jar` + `start.sh` + `scop-ftp.env`）；私有生产配置（萧山/西湖）由 GitHub Secrets 注入后，额外生成 `ScopeFTP-Server-xiaoshan.zip` / `ScopeFTP-Server-xihu.zip`；**启动时没有凭证会失败**
 - 客户端：macOS ARM64 / Intel DMG、Windows x64 免安装 exe + NSIS 安装包（`.exe`），全部作为 Actions Artifacts 下载
 
 所有 `server/src/main/resources/application-<env>.yml` 环境文件（dev/docker/xiaoshan/xihu）**一律不入库**
@@ -230,9 +230,9 @@ cd 07_scope-ftp
 命名规则：
 
 - 产物名固定，不随 profile 变化：
-  - 目录：`release/server/ftp-server/`
-  - 压缩包：`release/server/ftp-server.zip`
-  - 包内 Jar：`ftp-server.jar`
+  - 目录：`release/server/ScopeFTP-Server/`
+  - 压缩包：`release/server/ScopeFTP-Server.zip`
+  - 包内 Jar：`ScopeFTP-Server.jar`
   - 包内启动脚本：`start.sh`、`scop-ftp.env`
 - 不传配置名 → `default`：不激活 Spring profile，直接使用 jar 内 `application.yml`
 - 传 `xihu` → 使用 `application-xihu.yml`，启动自动带 `--spring.profiles.active=xihu`
@@ -244,17 +244,17 @@ cd 07_scope-ftp
 
 ```text
 release/server/
-  ftp-server/
-    ftp-server.jar
+  ScopeFTP-Server/
+    ScopeFTP-Server.jar
     start.sh
     scop-ftp.env        # 由 scripts/env* 生成，可直接使用
-  ftp-server.zip
+  ScopeFTP-Server.zip
 ```
 
 启动 / 停止（包内 `start.sh`，默认后台运行）：
 
 ```bash
-cd release/server/ftp-server
+cd release/server/ScopeFTP-Server
 ./start.sh -h           # 查看全部命令
 ./start.sh --app-key=xxx --app-secret=yyy   # 后台启动，日志写入 logs/console.log
 ./start.sh logs         # 跟随日志；Ctrl+C 只退出日志，不会停服务
@@ -284,11 +284,11 @@ cd release/server/ftp-server
 - `scop-ftp.env` 已设 `600` 权限；打包机的 JDK 路径会原样写入，如果和部署机不同，请先在 `scripts/env.local.<profile>` 配部署机路径再打包。
 - 服务器有多个 Java 版本时，优先在 `scripts/env.local.<profile>` 配好 `JAVA_HOME` 再打包；也可以打包后改包内 `scop-ftp.env`（`start.sh` 会用它启动并校验版本 ≥ 21），不配置则用 `PATH` 里的 `java`。
 - `scripts/env*` 里把 `JAVA_HOME` 留空（`JAVA_HOME=`）时，包内 `scop-ftp.env` 不会写入空值；`start.sh` 会使用启动前 shell 的 `JAVA_HOME`，没有则用 `PATH` 里的 `java`。
-- 每次构建会先清理 `release/server/` 下旧的 `ftp-server` / `ftp-server.zip`（以及历史 `ftp-server-*`），再生成本次指定 profile 的固定名产物；重新打包会覆盖包内 `scop-ftp.env`，临时修改请先备份，长期配置写进 `scripts/env*`。
+- 每次构建会先清理 `release/server/` 下旧的 `ScopeFTP-Server` / `ScopeFTP-Server.zip`（以及历史 `ScopeFTP-Server-*`），再生成本次指定 profile 的固定名产物；重新打包会覆盖包内 `scop-ftp.env`，临时修改请先备份，长期配置写进 `scripts/env*`。
 - 验证配置已经打进 Jar（以 xihu 为例）：
 
   ```bash
-  unzip -l release/server/ftp-server/ftp-server.jar | grep application-xihu.yml
+  unzip -l release/server/ScopeFTP-Server/ScopeFTP-Server.jar | grep application-xihu.yml
   ```
 
   应看到 `BOOT-INF/classes/application-xihu.yml`；`default` 包则检查 `BOOT-INF/classes/application.yml`。
@@ -298,15 +298,15 @@ cd release/server/ftp-server
 ```bash
 ./scripts/mvn.sh -f server/pom.xml -DskipTests clean package
 
-OUT=release/server/ftp-server
-cp server/target/ScopeFTP-server-1.0.0.jar "$OUT/ftp-server.jar"
+OUT=release/server/ScopeFTP-Server
+cp server/target/ScopeFTP-server-1.0.0.jar "$OUT/ScopeFTP-Server.jar"
 
 cd release/server
-rm -f ftp-server.zip
-zip -q -r ftp-server.zip ftp-server
+rm -f ScopeFTP-Server.zip
+zip -q -r ScopeFTP-Server.zip ScopeFTP-Server
 ```
 
-GitHub Actions 的 `ScopeFTP-server-profiles` Artifact 固定构建 `xiaoshan`、`xihu` 两个环境（需要两个 `APPLICATION_*_YML_BASE64` Secrets 齐全）；本地一次只能打一个环境。CI 会分别构建，再把固定名 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip` 便于区分。
+GitHub Actions 的 `ScopeFTP-Server-package` Artifact 始终包含默认 `ScopeFTP-Server.zip`；两个 `APPLICATION_*_YML_BASE64` Secrets 齐全时还会额外生成 `ScopeFTP-Server-xiaoshan.zip` / `ScopeFTP-Server-xihu.zip`。本地一次只能打一个环境。
 
 ## 防伪验证怎么做的
 
@@ -360,7 +360,7 @@ docker compose up -d --build
 
 或 Jar + systemd + Nginx，详见 [docs/03-deployment.md](docs/03-deployment.md)。
 
-分环境包解压后（固定为 `ftp-server.zip`，解压出 `ftp-server/`）直接执行包内 `start.sh`：默认后台启动，`./start.sh logs` 查看日志，`./start.sh status/stop/restart` 管理进程；详见 `./start.sh -h`。
+分环境包解压后（固定为 `ScopeFTP-Server.zip`，解压出 `ScopeFTP-Server/`）直接执行包内 `start.sh`：默认后台启动，`./start.sh logs` 查看日志，`./start.sh status/stop/restart` 管理进程；详见 `./start.sh -h`。
 
 服务器装了多个 Java 版本时，用 `JAVA_HOME` 指定部署用的 JDK 21：
 

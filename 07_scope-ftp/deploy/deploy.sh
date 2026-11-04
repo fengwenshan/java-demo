@@ -2,7 +2,7 @@
 # ScopeFTP-server —— 构建与部署脚本
 #
 # 用法：
-#   ./deploy/deploy.sh remote                # 上传已下载的服务端 Jar 并重启 systemd 服务
+#   ./deploy/deploy.sh remote                # 上传服务端 Jar（可从 ScopeFTP-Server.zip 解压）并重启 systemd 服务
 #   ./deploy/deploy.sh build                 # 可选：本地调试时构建服务端 Jar
 #   ./deploy/deploy.sh docker                # 服务器上用 Docker Compose 构建并启动
 #
@@ -52,7 +52,7 @@ deploy_remote() {
     JAR="$(ls -1 "$PROJECT_ROOT/server/target/ScopeFTP-server-"*.jar 2>/dev/null | grep -v original | head -n1 || true)"
   fi
   if [[ -z "${JAR:-}" || ! -f "$JAR" ]]; then
-    echo "未找到服务端 Jar：请从 GitHub Actions 的 ScopeFTP-server-jar artifact 下载后放到 server/target/，或设置 JAR_PATH=/path/to/ScopeFTP-server-*.jar" >&2
+    echo "未找到服务端 Jar：请下载 GitHub Actions 的 ScopeFTP-Server-package（ScopeFTP-Server.zip），解压后把 ScopeFTP-Server/ScopeFTP-Server.jar 放到 server/target/，或设置 JAR_PATH=/path/to/ScopeFTP-Server.jar" >&2
     exit 1
   fi
   echo "==> 上传 Jar 到 ${SERVER_USER}@${SERVER_HOST}:${REMOTE_DIR}"

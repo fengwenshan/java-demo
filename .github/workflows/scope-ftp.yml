@@ -52,38 +52,44 @@ jobs:
           mvn -B -f "$PROJECT_DIR/server/pom.xml" clean package
           ls -lh "$PROJECT_DIR/server/target/ScopeFTP-server-"*.jar
 
-      - name: Build profile packages (only when all private configs exist)
+      - name: Build server deployment packages
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zip unzip
+          mkdir -p "$PROJECT_DIR/release/artifacts"
+
+          # 默认包始终生成：包内是 ScopeFTP-Server/ + ScopeFTP-Server.jar + start.sh + scop-ftp.env，
+          # 不依赖私有环境配置，保证没有 Secrets 时也能下载可部署的 zip。
+          "$PROJECT_DIR/deploy/build-server-profiles.sh" default
+          cp "$PROJECT_DIR/release/server/ScopeFTP-Server.zip" \
+             "$PROJECT_DIR/release/artifacts/ScopeFTP-Server.zip"
+
+          # 明确校验固定包内容，避免只上传 jar 或空包。
+          for entry in ScopeFTP-Server/ScopeFTP-Server.jar ScopeFTP-Server/start.sh ScopeFTP-Server/scop-ftp.env; do
+            unzip -Z1 "$PROJECT_DIR/release/artifacts/ScopeFTP-Server.zip" | grep -Fxq "$entry" \
+              || { echo "ScopeFTP-Server.zip 缺少 $entry" >&2; exit 1; }
+          done
+          unzip -l "$PROJECT_DIR/release/artifacts/ScopeFTP-Server.zip"
+
           if [[ -f "$PROJECT_DIR/server/src/main/resources/application-xiaoshan.yml" \
              && -f "$PROJECT_DIR/server/src/main/resources/application-xihu.yml" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y zip
-            mkdir -p "$PROJECT_DIR/release/artifacts"
-            # 包内结构固定为 ftp-server/ + ftp-server.jar；一次构建一个 profile，
-            # 分别复制成带 profile 的文件名，避免两个固定名 zip 互相覆盖。
+            # 有完整私有配置时再额外生成分环境包，互不覆盖。
             for profile in xiaoshan xihu; do
               "$PROJECT_DIR/deploy/build-server-profiles.sh" "$profile"
-              cp "$PROJECT_DIR/release/server/ftp-server.zip" \
-                 "$PROJECT_DIR/release/artifacts/ftp-server-${profile}.zip"
+              cp "$PROJECT_DIR/release/server/ScopeFTP-Server.zip" \
+                 "$PROJECT_DIR/release/artifacts/ScopeFTP-Server-${profile}.zip"
             done
           else
-            echo "::warning::私有环境配置不完整，跳过分环境部署包（仍会上传 Jar）"
+            echo "::warning::私有环境配置不完整，仅生成默认 ScopeFTP-Server.zip（不生成分环境包）"
           fi
 
-      - name: Upload server jar
+      - name: Upload server package
         uses: actions/upload-artifact@v4
         with:
-          name: ScopeFTP-server-jar
-          path: 07_scope-ftp/server/target/ScopeFTP-server-*.jar
-          if-no-files-found: error
-
-      - name: Upload server profile packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: ScopeFTP-server-profiles
+          name: ScopeFTP-Server-package
           path: 07_scope-ftp/release/artifacts/*.zip
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   client-macos:
     name: Client macOS (${{ matrix.arch }})
@@ -252,7 +258,6 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
-            release-assets/**/*.jar
             release-assets/**/*.zip
             release-assets/**/*.dmg
             release-assets/**/*.exe

@@ -5,7 +5,7 @@
 #   ./deploy/build-server-profiles.sh                  # 默认包（profile=default）
 #   ./deploy/build-server-profiles.sh xihu             # 只打 xihu
 #
-# 固定产物名：目录 ftp-server/、压缩包 ftp-server.zip、Jar ftp-server.jar。
+# 固定产物名：目录 ScopeFTP-Server/、压缩包 ScopeFTP-Server.zip、Jar ScopeFTP-Server.jar。
 # 一次只能指定一个 profile；换 profile 重新打包会覆盖上一次的固定名产物。
 #
 # 没有配置名（profile）时用 default：不激活 Spring profile，直接使用 application.yml 的默认配置。
@@ -15,8 +15,8 @@
 # start.sh 的默认 JDK / JVM 参数也来自同一份配置；端口、存储根等仍以 jar 内 application.yml（default）或 application-<profile>.yml 为准。
 #
 # 产物（release/server/，名字固定）：
-#   ftp-server/      ftp-server.jar + start.sh + scop-ftp.env
-#   ftp-server.zip   上述目录的压缩包
+#   ScopeFTP-Server/      ScopeFTP-Server.jar + start.sh + scop-ftp.env
+#   ScopeFTP-Server.zip   上述目录的压缩包
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,7 +26,7 @@ if [[ ${#PROFILES[@]} -eq 0 ]]; then
   PROFILES=(default)
 fi
 if [[ ${#PROFILES[@]} -gt 1 ]]; then
-  echo "产物名固定为 ftp-server，一次只能指定一个 profile；需要多个请分别执行。" >&2
+  echo "产物名固定为 ScopeFTP-Server，一次只能指定一个 profile；需要多个请分别执行。" >&2
   exit 2
 fi
 
@@ -77,16 +77,16 @@ JAR="$(ls -1 "$PROJECT_ROOT/server/target"/*.jar | grep -v original | head -n1)"
 OUT="$PROJECT_ROOT/release/server"
 mkdir -p "$OUT"
 
-# 固定产物名：构建前清理旧的 ftp-server（以及历史 ftp-server-*）目录和 zip。
-for existing in "$OUT"/ftp-server*; do
+# 固定产物名：构建前清理旧的 ScopeFTP-Server（以及历史 ftp-server）目录和 zip。
+for existing in "$OUT"/ScopeFTP-Server* "$OUT"/ftp-server*; do
   [[ -e "$existing" ]] || continue
   rm -rf "$existing"
 done
 
 for profile in "${PROFILES[@]}"; do
-  dir="$OUT/ftp-server"
+  dir="$OUT/ScopeFTP-Server"
   mkdir -p "$dir"
-  cp "$JAR" "$dir/ftp-server.jar"
+  cp "$JAR" "$dir/ScopeFTP-Server.jar"
 
   # 1) 读取该 profile 在 scripts/env* 里的生效配置
   cfg_file="$(mktemp "${TMPDIR:-/tmp}/scop-ftp-env.XXXXXX")"
@@ -171,7 +171,7 @@ DIR="\$(pwd)"
 PID_FILE="\$DIR/scop-ftp.pid"
 LOG_DIR="\$DIR/logs"
 LOG_FILE="\$LOG_DIR/console.log"
-JAR_FILE="ftp-server.jar"
+JAR_FILE="ScopeFTP-Server.jar"
 SPRING_PROFILE_OPT="${SPRING_PROFILE_OPT}"
 SHELL_JAVA_HOME="\${JAVA_HOME:-}"
 ENV_FILE_JAVA_HOME_EXPLICIT=0
@@ -425,7 +425,7 @@ esac
 EOF
   chmod +x "$dir/start.sh"
 
-  (cd "$OUT" && rm -f "ftp-server.zip" && zip -q -r "ftp-server.zip" "ftp-server")
+  (cd "$OUT" && rm -f "ScopeFTP-Server.zip" && zip -q -r "ScopeFTP-Server.zip" "ScopeFTP-Server")
   echo "==> $dir"
 done
 
