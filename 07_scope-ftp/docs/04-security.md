@@ -16,7 +16,7 @@
 | T7 | 上传可执行文件后诱导下载 | 不限制上传类型（业务要求），但下载固定 `Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`，只存储不执行；生产建议接入文件内容扫描 | `FileStorageService` + Controller |
 | T8 | 时钟漂移导致合法请求被拒 | `verify` 返回 `serverTime`，客户端可提示校准 | `/api/auth/verify` |
 | T9 | 伪造客户端身份、跳过验证直接调用 activate、或换机绕过设备绑定 | 所有 `/api/**`（含 health）强制 `X-Device-Mac`；`client_blacklist_ip` / `client_blacklist_mac` 两张表任一命中即拦截；`activate` 前必须有同 MAC+IP 的近期 `verify`，否则按乱序封禁 | `ClientGuardFilter` + `ClientGuardService` |
-| T10 | 把 A 当开放代理、SSRF 打内网/云元数据、下游篡改路径或 body | relay 默认关闭；目标地址只允许 http/https、禁止 userinfo/query/fragment，默认拒绝 loopback/link-local/云元数据，私网可配置放行，可选 `allowed-hosts`；每跳独立签名绑定 method/path/query/payloadHash，A 改路径/body 会让下游验签失败；链头不含 secret | `RelayForwardFilter` + `RelayUrlGuard` + `RelayChainCodec` |
+| T10 | 把 A 当开放代理、SSRF 打内网/云元数据、下游篡改路径或 body | relay 配置默认关闭，本地 `run-server.sh`/分包 `start.sh` 默认注入开启；目标地址只允许 http/https、禁止 userinfo/query/fragment，默认拒绝 loopback/link-local/云元数据，私网可配置放行，可选 `allowed-hosts`；每跳独立签名绑定 method/path/query/payloadHash，A 改路径/body 会让下游验签失败；链头不含 secret | `RelayForwardFilter` + `RelayUrlGuard` + `RelayChainCodec` |
 
 ## 2. 已实现的防护细节
 
@@ -130,13 +130,13 @@ sqlite3 "$DB" "DELETE FROM client_blacklist_mac WHERE mac='AA:BB:CC:DD:EE:FF';"
 - **链头一致性**：A 要求链第 0 跳的 `appKey/timestamp/nonce/signature/deviceId` 与外层标准签名头完全一致；同一链 appKey 不得重复；链头长度/跳数/字段长度有上限（40010）。
 - **来源链（P1）**：`X-Relay-Via` 由上一跳追加，B 审计 `[A]`、C 审计 `[A,B]`；它不是密码学证明，持有 A 凭据的客户端可伪造既往来源，**P1 依赖网络隔离（B/C 只允许 A 访问）**；P2 可给 Via 加逐跳签名/MAC。
 - **SSRF**：目标 URL 只允许 http/https，禁止 userinfo/query/fragment；DNS 解析后拒绝 `0.0.0.0`、multicast、loopback（`allow-loopback` 默认 false）、link-local/169.254.169.254；私网默认允许（`allow-private-network=true`，内网场景需要），公网部署建议关掉并配 `allowed-hosts`。残余风险：DNS rebinding 未做 TOCTOU 二次校验，P2 处理。
-- **审计**：中转节点审计 action 加 `relay.` 前缀，`relayVia` 写入 JSONL + SQLite `relay_via`（旧库自动 ALTER TABLE）；不记录原始 `X-Relay-Chain`/`X-Relay-Via` 头（只记录解析后的 `{appKey,name,url}`），不记录 secret。
-- **部署**：relay 默认关闭，A/B 必须显式 `app.relay.enabled=true`；B/C 不要直接暴露给客户端或公网；旧客户端可能把 v3 relay 当 direct 绕过 A，发布期限制 B/C 可达性或轮换凭据。
+- **审计**：中转节点审计 action 加 `relay.` 前缀，且日志抽屉的 operation/both 分类同时收录 `relay.*` 动作；`relayVia` 写入 JSONL + SQLite `relay_via`（旧库自动 ALTER TABLE）；不记录原始 `X-Relay-Chain`/`X-Relay-Via` 头（只记录解析后的 `{appKey,name,url}`），不记录 secret。
+- **部署**：relay 配置默认关闭；本地 `scripts/run-server.sh`/分包 `start.sh` 默认注入开启，直接 jar/systemd/Docker 需显式开启；B/C 不要直接暴露给客户端或公网；旧客户端可能把 v3 relay 当 direct 绕过 A，发布期限制 B/C 可达性或轮换凭据。
 
 ## 3. 边界与已知限制（务必阅读）
 
 1. **客户端密钥可被逆向**：AppKey / AppSecret 现在编译进客户端二进制（`builtin.rs`），分发给用户后理论上可被提取；
-   本项目的目标是「显著提高第三方直接调用接口的成本」，不是绝对不可破。AppKey/AppSecret 默认内置；若在设置页为服务器填写自定义密钥，会保存在本地 config.json（权限 0600），不会进入 WebView；
+   本项目的目标是「显著提高第三方直接调用接口的成本」，不是绝对不可破。AppKey/AppSecret 默认内置；若在设置页为服务器填写自定义密钥，会保存在本地 config.json（权限 0600）；常规视图不返回，查看时按 id 读取并显示；当前配置文件是 0600 明文，不涉及解密；
    使用内置默认密钥时，轮换需要重新构建客户端；为服务器填写自定义密钥时可在设置页修改，并同步服务端 `UPLOAD_APP_KEY` / `UPLOAD_APP_SECRET`（或启动 Jar 时的 `--app-key` / `--app-secret`）。
 2. **单机内存态**：nonce 缓存和限流都在进程内存里，多实例部署时需换成 Redis（`NonceCache` 与 `RateLimiter` 均为独立组件，替换成本低）。
 3. **SQLite 元数据 + 单机内存索引**：无需安装数据库服务，适合中小规模单实例；SQLite 单写者，多实例共享同一存储根需要改成集中式数据库/对象存储，或保证同一根只由一个实例写入。
@@ -155,7 +155,7 @@ sqlite3 "$DB" "DELETE FROM client_blacklist_mac WHERE mac='AA:BB:CC:DD:EE:FF';"
 - [ ] 8080 端口未对公网开放（安全组/防火墙）
 - [ ] Nginx `client_max_body_size` ≥ 服务端上限，`proxy_request_buffering off`
 - [ ] `client/data/` 有备份策略，磁盘容量监控
-- [ ] 若启用 relay：A/B 已升级并显式 `app.relay.enabled=true`；B/C 只允许 A/上一跳访问，未对公网暴露；按需关闭 `allow-private-network`、配置 `allowed-hosts`；发布期已限制旧客户端绕过 A
+- [ ] 中转节点的 relay 已开启（本地脚本/分包 `start.sh` 默认注入；直接 jar/systemd/Docker 需显式 `app.relay.enabled=true`）；B/C 只允许 A/上一跳访问，未对公网暴露；按需关闭 `allow-private-network`、配置 `allowed-hosts`；发布期已限制旧客户端绕过 A
 - [ ] 服务端时间同步（chrony/NTP），客户端设备时间准确
 - [ ] 定期轮换 appSecret，并同步更新客户端
 - [ ] 日志中确认未打印 appSecret 与签名原文
@@ -179,7 +179,7 @@ sqlite3 "$DB" "DELETE FROM client_blacklist_mac WHERE mac='AA:BB:CC:DD:EE:FF';"
 
 ## 6. 验证方式
 
-- 服务端单元/集成测试：签名测试向量、过期、重放、错误签名、哈希篡改、设备绑定、relay 链头/每跳签名/3 跳/流式/SSRF/错误映射/审计来源；`ClientIdentityGuardIntegrationTest` 覆盖缺 MAC/IP 封禁、MAC/IP 两张黑名单 OR 拦截、activate 乱序封禁、手动删行立即解封（335 passed）
+- 服务端单元/集成测试：签名测试向量、过期、重放、错误签名、哈希篡改、设备绑定、relay 链头/每跳签名/3 跳/流式/SSRF/错误映射/审计来源；`ClientIdentityGuardIntegrationTest` 覆盖缺 MAC/IP 封禁、MAC/IP 两张黑名单 OR 拦截、activate 乱序封禁、手动删行立即解封（341 passed）
 - 端到端脚本：`E2E_STORAGE_ROOT=<root> node scripts/e2e.mjs`（真实 HTTP，覆盖 40100/40101/40102/40001/40003/40300 等错误路径，以及按目录上传/路径下载删除/越界）；开启 `client-identity-enforced` 后同样 55 passed（所有请求带 `X-Device-Mac`）
 
 ## 7. 接口认证覆盖检查（2026-10-30）

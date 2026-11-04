@@ -864,7 +864,7 @@ app:
 - v2 → v3 迁移；v1 迁移不变；
 - 父不存在/环/自指/层级过深 → `configured=false`；
 - 级联删除、允许删到空配置、active 回退/清空、重启后保持空配置（normalize 不补默认）；
-- relay 的 secret 不回显到视图；secret 掩码；
+- relay 的 secret 不在常规视图回显；设置页点击密码框眼睛时按服务器 id 读取本地自定义值；
 - `resolve_chain` 顺序/去重/最大深度。
 
 `client/src-tauri/src/api.rs`：

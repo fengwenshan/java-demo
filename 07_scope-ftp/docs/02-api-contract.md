@@ -202,9 +202,9 @@ X-Relay-Chain: <Base64URL(无 padding) JSON 数组>
 - 每跳独立签名：非最后一跳签 `/api/relay` + 原 path，最后一跳签原 path；`canonicalQuery` / `payloadHash` 所有跳相同。链里**没有 AppSecret**。
 - 外层请求的签名头必须是链第 0 跳；链头第 0 跳的 `appKey/timestamp/nonce/signature/deviceId` 必须与外层请求头完全一致。`SignatureFilter` 的 canonical path 仍是实际收到的 `/api/relay/api/...`；设备绑定/限流等业务判断用剥离前缀后的 `/api/...`。
 - 中间节点转发时追加 `X-Relay-Via`：`{appKey,name,url}[]` 的 Base64URL JSON。A 不追加自己（A 的审计无来源）；B 收到 `[A]` 后追加 B 给 C；C 审计来源 `[A,B]`。
-- `/api/relay` 默认关闭；关闭时返回 `40320`。链头超过 `app.relay.max-chain-header-bytes` / 跳数超过 `max-hops` → `40010`；目标不可达 `50210`、非 JSON 下游错误 `50211`、下游 403 `50212`、超时 `50410`。
+- `/api/relay` 配置默认关闭（本地 `scripts/run-server.sh` 和分包 `start.sh` 默认注入 `--app.relay.enabled=true`）；关闭时返回 `40320`。链头超过 `app.relay.max-chain-header-bytes` / 跳数超过 `max-hops` → `40010`；目标不可达 `50210`、非 JSON 下游错误 `50211`、下游 403 `50212`、超时 `50410`。
 - 服务端对目标地址做 SSRF 守卫：只允许 http/https，禁止 userinfo/query/fragment；默认拒绝 loopback/link-local/云元数据，私网可用 `app.relay.allow-private-network` 放行（默认 true），可用 `app.relay.allowed-hosts` 白名单。
-- A/B 作为中转节点必须升级并显式 `app.relay.enabled=true`；最终目标的数据接口可以仍是旧版，但来源审计需要升级。
+- 本地 `scripts/run-server.sh`/分包 `start.sh` 启动的 A/B 默认即可转发；直接 `java -jar` 或其它部署方式仍需显式 `app.relay.enabled=true`；最终目标的数据接口可以仍是旧版，但来源审计需要升级。
 
 ## 3. 接口定义
 
@@ -339,7 +339,7 @@ X-Relay-Chain: <Base64URL(无 padding) JSON 数组>
 - **按当前目录原名落盘（FTP 式）**：文件写入 `dir` 指定的已存在目录（在该 `root` 根内），磁盘文件名=展示名（清洗后）；重名自动改为 `report (1).pdf`、`report (2).pdf`…（`CREATE_NEW` 原子占位，最多 1000 次，超限 `50000`）
 - `root` 必须是配置中存在的根 id，否则 `40000`；路径只在**该根内**解析，跨根 / 根外一律拒绝
 - 文件名清洗：去掉路径分隔符、控制字符，最长 255 字符
-- 目录规则：`dir` 不存在 → `40400`；是文件、绝对路径、`..`、越界、指向 `.upload-meta` → `40000`。目前**没有新建目录接口**，目标目录需先在服务器磁盘上存在
+- 目录规则：`dir` 不存在 → `40400`；是文件、绝对路径、`..`、越界、指向 `.upload-meta` → `40000`。新建空目录/文件可走 3.26 `POST /api/files/create`；上传目标目录仍需已存在
 
 响应 `data`：同 3.4 的 FileMeta 对象。
 
@@ -693,8 +693,8 @@ Cache-Control: no-store
 
 Query：
 - `page` 默认 1；`size` 默认 50，范围 1..200（超出 → `40000`）
-- `action` 可选精确值（`upload`/`download`/`delete`/`rename`/`copy`/`move`/`extract`/`terminal.exec`/`auth.verify`/`auth.activate` 等）
-- `category` 可选 `operation` | `connection` | `both`：`operation` 只返回服务器实际操作（上传/下载/删除/重命名/拷贝/移动/解压/读取内容/保存内容/终端等），`connection` 只返回 `auth.verify`/`auth.activate`，`both` 返回两者并集；不传则返回全部审计记录
+- `action` 可选精确值（`upload`/`download`/`delete`/`rename`/`copy`/`move`/`extract`/`create`/`terminal.exec`/`auth.verify`/`auth.activate` 等）
+- `category` 可选 `operation` | `connection` | `both`：`operation` 只返回服务器实际操作（上传/下载/删除/重命名/新建/拷贝/移动/解压/读取内容/保存内容/终端等），`connection` 只返回 `auth.verify`/`auth.activate`，`both` 返回两者并集；不传则返回全部审计记录
 - `success` 可选 `true`/`false`
 - `keyword` 可选，模糊匹配 `path` / `request_id` / `path_param` / `file_name` / `terminal_command`
 - `from`/`to` 可选 ISO-8601（如 `2026-10-30T00:00:00+08:00` 或 `...Z`）；`from > to` → `40000`
@@ -730,7 +730,7 @@ Query：
       "httpStatus": 200,
       "success": true,
       "error": null,
-      "userAgent": "ScopeFTP-client/0.1.0",
+      "userAgent": "ScopeFTP/0.1.0",
       "fileName": null,
       "relayVia": []
     }
@@ -743,9 +743,31 @@ Query：
 ```
 
 - 只能查当前验签通过的 appKey，不能跨 appKey；查询自身写入一条 `action=audit.list`。
-- `relayVia`：`{appKey,name,url}[]`，中间节点写入来源链；B 为 `[A]`，C 为 `[A,B]`，A 自己转发请求为空。旧库/无来源时为 `[]`。中转节点上收到 `/api/relay` 的请求 `action` 会加 `relay.` 前缀（如 `relay.files.list`）。
+- `relayVia`：`{appKey,name,url}[]`，中间节点写入来源链；B 为 `[A]`，C 为 `[A,B]`，A 自己转发请求为空。旧库/无来源时为 `[]`。中转节点上收到 `/api/relay` 的请求 `action` 会加 `relay.` 前缀（如 `relay.files.list`）；`category=operation/both` 现已同时收录 `relay.*` 形态，日志抽屉会以「经转发 · 上传」等标签显示。
 - 审计 DB 未启用/不可用时返回 `50000`，message 为「审计日志存储不可用/查询失败」。
 - 日志是异步写入，刚完成的请求可能有毫秒级延迟；字段含义见 2.7。
+
+### 3.26 `POST /api/files/create`（签名，JSON，令牌 5）
+
+在存储根内**已存在的目录**下新建空文件或文件夹（不覆盖）。
+
+```json
+{ "root": "work", "parent": "docs", "name": "新建文件.txt", "type": "file" }
+```
+
+- `root` 可选（缺省=默认根；非法 → `40000`）
+- `parent` 可选：父目录相对该根的路径（空/缺省=根目录）；父目录必须已存在且为目录，否则 `40000`；绝对路径、`.`/`..`、NUL、symlink、`.upload-meta`、跨根 → `40000`
+- `type`：`file`（新建空文件）或 `directory`（新建文件夹），大小写不敏感，其他值 → `40000`
+- `name`：trim 后 1~255 字符，**单段名字**；拒绝 `/`、`\`、NUL、控制字符、`.`、`..`、空、`.upload-meta`；同名文件或目录已存在 → `40000`，**不覆盖**
+- 新建条目**不写文件元数据表**（与解压产物一致），可正常浏览/搜索/下载/在线编辑/重命名/删除
+- 响应 `data`：
+
+```json
+{ "root": "work", "path": "docs/新建文件.txt", "type": "file", "name": "新建文件.txt" }
+```
+
+- `type`：`file` | `directory`；`path` 为相对该根的新条目路径
+- 失败：非法参数/父目录不存在/冲突/越界 `40000`；IO 异常 `50000`
 
 ## 4. 错误码表
 
@@ -760,7 +782,7 @@ Query：
 | 40101 | 401 | 请求已过期 | 时间戳超窗 |
 | 40102 | 401 | 请求重复 | nonce 已使用 |
 | 40103 | 401 | 客户端未授权 | appKey 不存在或禁用 |
-| 40110 | 401 | 转发目标鉴权失败 | 下游 401（非 40101） |
+| 40110 | 401 | 代理服务器鉴权失败 | 下游 401（非 40101） |
 | 40300 | 403 | 设备未授权 | 设备绑定不匹配 |
 | 40310 | 403 | IP 已被封禁 | 命中 `client_blacklist_ip`（所有 `/api/**` 生效） |
 | 40311 | 403 | 设备物理地址已被封禁 | 命中 `client_blacklist_mac`（任一条命中即拦截） |
@@ -770,10 +792,10 @@ Query：
 | 40400 | 404 | 资源不存在 | 文件不存在 |
 | 42900 | 429 | 请求过于频繁 | 触发限流 |
 | 50000 | 500 | 服务器内部错误 | 未捕获异常 |
-| 50210 | 502 | 转发目标不可达 | DNS/连接失败 |
-| 50211 | 502 | 转发目标返回异常 | 3xx、非 JSON 429/5xx 等 |
-| 50212 | 502 | 转发目标拒绝来源身份 | 下游 403（非设备绑定） |
-| 50410 | 504 | 转发目标超时 | 下游超时 |
+| 50210 | 502 | 代理服务器不可达 | DNS/连接失败 |
+| 50211 | 502 | 代理服务器返回异常 | 3xx、非 JSON 429/5xx 等 |
+| 50212 | 502 | 代理服务器拒绝来源身份 | 下游 403（非设备绑定） |
+| 50410 | 504 | 代理服务器超时 | 下游超时 |
 
 限流：默认令牌桶容量 1000、每秒补 1 个；单文件上传与分片 `init`/`complete` 各消耗 5 个令牌，分片 PUT/状态/取消及其它接口各 1 个（可通过 `app.security.rate-limit.*` / `UPLOAD_RATE_LIMIT_*` 配置）。
 
@@ -818,7 +840,7 @@ Query：
 - 每次请求按 `activeServerId` 解析 root→target 链：外层请求到 root，携带 `X-Relay-Chain`，每跳使用自己的 `appKey/appSecret/deviceId` 签名；链中**不出现 secret**。
 - 旧单服务器配置（v1）与 v2 平铺列表在加载时自动迁移为 v3（全部按 direct 处理）；新客户端不再写 v2。
 - `serverUrl` 保存时去掉末尾 `/`，必须是 `http(s)://host[:port][/子路径]`，不允许 query/fragment/userinfo。
-- relay 的 AppKey/AppSecret 必填，**不回退内置值**；direct 保存时也要求显式填写（必须与服务端启动时一致），旧配置的空值仍可回退内置值。secret 只保存在本地 config.json（0600），不返回前端。
+- relay 的 AppKey/AppSecret 必填，**不回退内置值**；direct 保存时也要求显式填写（必须与服务端启动时一致），旧配置的空值仍可回退内置值。secret 只保存在本地 config.json（0600）；常规配置视图不返回，仅设置页点击密码框眼睛时按 id 读取本地自定义值。
 - `deviceId` 每台服务器首次保存时用 UUID v4 生成并持久化；`configVersion=3` 的配置不允许被旧客户端安全读取（旧客户端可能把 relay 当 direct 绕过 A）。
 - 允许删到空配置：`servers=[]` 时 `activeServerId=""`、`activeServer=null`，重启不会自动补默认服务器；首次安装（文件不存在/空文件）才生成一台默认 direct。
 - 删除服务器会级联删除其整棵子树、清理这些 serverId 的续传状态；active 被删时回退父级/剩余 direct，空则清空。
@@ -833,6 +855,7 @@ Query：
 | `verify_relay_preview` | `{parentId, existingId?, name, serverUrl, deviceName, appKey, appSecret?}` | 不落盘：按 parent 链 preflight 祖先 + 验证临时 target，返回 3.2 的 data；新建用临时 deviceId，不激活 target |
 | `delete_server` | `{id}` | 同 `get_config`；级联删除整棵子树及其续传状态；允许删到空配置；active 被删回退父级/剩余 direct，空则 `activeServer=null` |
 | `set_active_server` | `{id}` | 同 `get_config` |
+| `get_local_network_info` | 无 | `{mac, ip}`：本机物理地址（大写冒号格式）与默认路由网卡的局域网 IPv4；只用于详情页展示，取不到为空串（排除回环/链路本地） |
 | `verify_connection` | 无 | 3.2 的 data |
 | `activate` | 无（用已存配置的 deviceId/deviceName） | 3.3 的 data |
 | `upload_file` | `{path, description?, uploadId, dir?, root?}` | FileMeta（3.4）；`dir` 为相对所选根的已存在目录，缺省=根目录；`root` 缺省=默认根。**>32MB 内部自动走 3.11~3.15 分片上传并断点续传，命令签名不变** |
@@ -844,6 +867,7 @@ Query：
 | `list_server_dir` | `{path?, root?}` | 3.8 的 data（`path` 省略/空=根目录） |
 | `search_server_files` | `{keyword, limit?, root?}` | 3.16 的 data（`limit` 默认 100；`root` 缺省=默认根） |
 | `rename_server_file` | `{path, newName, root?}` | 3.18 的 data；`newName` 仅单段名字，冲突/非法名返回中文错误 |
+| `create_server_entry` | `{parent, name, kind, root?}` | 3.26 的 data；`parent` 空=存储根目录，`kind` 仅 `file`/`directory`，冲突/非法名返回中文错误 |
 | `read_server_file_content` | `{path, root?}` | 3.19 的 data（UTF-8 文本 ≤2MiB） |
 | `save_server_file_content` | `{path, content, expectedSha256?, root?}` | 3.20 的 data（覆盖保存，sha 冲突返回中文错误） |
 | `extract_zip_file` | `{path, root?}` | 3.21 的 data（解压到同级同名目录） |
@@ -885,15 +909,16 @@ Query：
 
 - 语言：`ConfigProvider locale={zhCN}`；主题使用 antd 5 默认 + 少量 token（圆角 8、主色 #1677ff）；用 `<App>` 提供 message/modal 上下文
 - 布局：左侧固定 Sider（约 280px）+ 右侧内容区，**左右两栏 FTP 式**，不再有顶部导航 Tab：
-  1. **左侧服务器面板**：服务器列表（每项名称 + 地址，active 高亮，点击切换；铅笔图标进入该服务器详情/编辑）+「+ 添加服务器」；当前服务器卡片显示连接状态 Tag、地址、设备名、最大文件大小 +「验证连接」「设置」；其下为**「存储目录」列表**（来自 3.17 的 roots，显示 `name`、Tooltip 全路径，当前高亮，点击切换根并重置路径）；未配置时显示「去设置」引导
+  1. **左侧服务器面板**：服务器列表（每项名称 + 地址，active 高亮，点击切换并进入目录浏览；行右侧信息图标打开该服务器的「设备与服务端」详情页（编辑从详情页进入，列表行上不再有编辑图标）+「+ 添加服务器」；其下为**「存储目录」列表**（来自 3.17 的 roots，显示 `name`、Tooltip 全路径，当前高亮，点击切换根并重置路径）；未配置时显示「去设置」引导
   2. **右侧目录浏览器**：**单行首行**：左侧路径（文件夹图标 + 面包屑，首段=当前根名称，可点击跳转、超长省略）；右侧 4 个纯图标按钮（无文字、Tooltip）：查找（VSCode 式命令面板，只在当前存储根内递归搜索 3.16，同时命中文件与目录；↑↓ 选择、Enter 打开、Esc 关闭）、上传、刷新、终端；无整块标题栏，返回上级通过面包屑完成（点击选择文件兜底）；所有请求都带当前 `rootId`；目录页工具栏为纯图标（查找 ⌘P / 上传 / 刷新 / 终端，均有 Tooltip），左侧仅路径；底部可打开 **远程终端面板**（40vh、深色、命令历史、cwd 显示、清空/关闭），命令直接在输出区输入（内联 prompt），Tab 补全当前目录/子目录路径（唯一候选补全、多候选列出）；右键文件/目录「在此打开终端」会把 cwd 定位到文件所在目录/该目录本身，高危与越界路径拦截后弹警告。
 
 在线编辑弹窗内置 **Monaco（VS Code 内核）**：主题 `vs`、无 minimap、自动换行、自动布局；按扩展名自动识别语言（txt/json/js/ts/html/css/java/py/xml/yaml/sql/sh/md/...→plaintext），顶部「语言」下拉可手动切换（30 种中文标签）并立即高亮；顶部「Tab」下拉可选 2/4 空格（默认 4，`insertSpaces=true`、关闭自动检测缩进，选择持久化到 localStorage 并即时生效）；⌘S/Ctrl+S 保存，未关闭需确认，保存失败保留内容。
 
-**Finder 式列表**：列 `名称` / `修改日期`（`YYYY年M月D日 HH:mm`）/ `大小`（目录 `--`）/ `种类`（文件夹/PDF 文稿/PPT 演示文稿/Word 文稿/Excel 表格/文本文稿/图片/压缩包/音频/视频/文件）；单击选中（Finder 蓝），↑/↓（Home/End）移动选中，Enter 或对选中行再次单击进入行内重命名，双击文件用系统默认应用打开、双击文件夹进入；无「操作」列，下载/删除/编辑/解压/终端/拷贝/移动走**行右键菜单**（在线编辑 / 解压仅 .zip / 在此打开终端 / 拷贝 / 移动到… / 下载 / 重命名 / 删除）；「移动到…」弹窗可切换存储根并浏览目录选择目标（重命名直接在该行名称单元格**内联编辑**：自动聚焦并全选原名，回车/失焦保存、Esc 取消，仅单段名字；删除目录前先 `GET /api/files/dir` 判断是否为空：空目录普通确认，非空目录强提示「目录非空（共 N 项），其中的文件和子目录会一并删除，且不可恢复」，确认后目录统一带 `recursive=true` 调 3.10 递归删除（空目录同样带，避免嵌套根下隐藏 `.upload-meta` 造成非空误判）；文件删除不带 `recursive`）；`Table`（名称、类型、大小、修改时间、操作[下载/删除]，目录行点击进入）；文件行下载走 3.9、删除走 3.10（删除均为 `modal.confirm` 二次确认，不可恢复）；空目录/truncated 提示
+**Finder 式列表**：列 `名称` / `修改日期`（`YYYY年M月D日 HH:mm`）/ `大小`（目录 `--`）/ `种类`（文件夹/PDF 文稿/PPT 演示文稿/Word 文稿/Excel 表格/文本文稿/图片/压缩包/音频/视频/文件）；单击选中（Finder 蓝），↑/↓（Home/End）移动选中，Enter 或对选中行再次单击进入行内重命名，双击文件用系统默认应用打开、双击文件夹进入；目录空白处右击显示**空白菜单**（新建文件 / 新建文件夹 / 在此打开终端，终端以当前目录打开）；客户端全局禁用 WebView 默认右键菜单（Reload / Inspect Element 等），仅输入框、文本域、编辑器保留系统编辑菜单；无「操作」列，下载/删除/编辑/解压/终端/拷贝/移动/新建走**行右键菜单**（新建文件 / 新建文件夹 / 在线编辑 / 解压仅 .zip / 在此打开终端 / 拷贝 / 移动到… / 下载 / 重命名 / 删除；右键文件夹时“新建”建在该文件夹内，右键文件时建在文件所在目录）；「移动到…」弹窗可切换存储根并浏览目录选择目标（重命名直接在该行名称单元格**内联编辑**：自动聚焦并全选原名，回车/失焦保存、Esc 取消，仅单段名字；删除目录前先 `GET /api/files/dir` 判断是否为空：空目录普通确认，非空目录强提示「目录非空（共 N 项），其中的文件和子目录会一并删除，且不可恢复」，确认后目录统一带 `recursive=true` 调 3.10 递归删除（空目录同样带，避免嵌套根下隐藏 `.upload-meta` 造成非空误判）；文件删除不带 `recursive`）；`Table`（名称、类型、大小、修改时间、操作[下载/删除]，目录行点击进入）；文件行下载走 3.9、删除走 3.10（删除均为 `modal.confirm` 二次确认，不可恢复）；空目录/truncated 提示
   3. **拖拽上传（核心）**：监听 Tauri 原生拖放 `getCurrentWebview().onDragDropEvent`——`enter/over` 显示整块遮罩「松开上传到 <当前目录>」，`drop` 后过滤目录/空文件，按当前 `path` 串行上传（`upload_file` 的 `dir`），复用 `upload-progress` 显示进度，完成后汇总提示并刷新；上传中禁用重复拖入。**>32MB 自动走分片上传（3.11~3.15），断点续传状态存本地 `uploads.json`（serverId/dir/name/size/mtime → uploadId）**
-  4. **设置/服务器详情**（从左侧服务器铅笔进入，点左侧服务器返回目录）：`Form`（服务器名称、服务器地址、AppKey、AppSecret、设备名称）；保存时 AppKey/AppSecret 必填（必须与服务端启动时一致），**relay 额外禁止回退内置值**（编辑时留空/掩码=保留）；显示 deviceId、绑定状态、服务端限制（最大文件大小）、服务端存储目录、可点击转发链；设置页提供「验证连接」和「保存」（编辑非 active 服务器也可离线保存）；删除已保存服务器，允许删到空配置；**不再有单独的激活设备按钮**；「验证连接」= 验证 → 保存 → 激活设备：添加页先用当前表单值直接验证（不落盘），成功后才添加服务器并激活设备（激活失败保留服务器并提示，验证失败不保存不添加）；编辑页先保存未保存修改，再验证并激活当前设备（非当前服务器需先在左侧切换，验证成功才保存修改）；激活前客户端会先调 verify（服务端要求 verify→activate 顺序，乱序会被 40313 封禁）；离开时保留未保存确认；长文本必须换行/省略，不允许溢出卡片或产生页面横向滚动条
-- **转发 UI（v3）**：左侧服务器列表按 `parentId` 递归成树，relay 行带「转发」Tag；A/B/C 的「转发目标」卡片列出直接子节点，点击切换 active；只有 active 且 `connection.status==="connected"` 才显示添加 `+`。A 未连接时 B 的地址/凭据表单无法出现；B/C 表单包含「目标地址 + 目标 AppKey/AppSecret + 设备名」。新建 relay 走 `verifyRelayPreview → saveRelay`（按钮「验证并添加」）；编辑已保存 relay 走 `saveRelay`，不要求父链连接。右侧标题显示「B（经 A → B 转发）」。审计详情「来源/转发链」按 `relayVia` 的 appKey（其次 url）映射本地服务器，可点击切换；找不到时显示纯文本。删除已保存服务器允许删到空配置，新建表单不显示删除。
+  4. **「设备与服务端」详情页**（从左侧服务器列表的信息图标进入；只读，**不切换当前服务器**）：标题右侧「浏览文件」（切到该服务器并回目录浏览）、「编辑」（进编辑页）、「代理服务器」（当前服务器已连接时才可用，进「添加代理服务器」表单）；展示服务器名称、上级服务器与可点击转发链（relay）、服务器地址、设备 ID/设备名称、**本机 MAC / 本机 IP（`get_local_network_info`，排除 127.0.0.1/localhost，非当前服务器也显示）**、AppKey（自定义密钥 Tag）、连接状态、绑定状态、设备绑定、服务端标识、存储目录、单文件上限、服务器时间；**非当前服务器**只展示静态配置，连接状态显示「未连接（非当前服务器）」，绑定状态/设备绑定/服务端标识/存储目录/大小上限/服务器时间显示「切换为当前服务器后可查看」；只有当前服务器连接失败时显示「重新检测」
+  5. **编辑页**（添加服务器、添加代理服务器、编辑 direct 或 relay；从详情页「编辑」进入）：只有 `Form`（名称、服务器地址、AppKey、AppSecret、设备名称）+「保存配置」+「验证连接」+ 删除，**不再显示「设备与服务端」信息卡和「代理服务器」入口**（都拆到上一项详情页）；保存时 AppKey/AppSecret 必填（必须与服务端启动时一致），**relay 额外禁止回退内置值**（编辑时留空/掩码=保留）；设置页有两个按钮：「保存配置」只保存本地配置、不验证不激活；「验证连接」先验证，成功后才保存并激活；删除已保存服务器，允许删到空配置；**不再有单独的激活设备按钮**；「验证连接」= 预览验证 → 保存 → 激活设备：添加页先用当前表单值直接验证（不落盘），成功后才添加服务器并激活设备（激活失败保留服务器并提示，验证失败不保存不添加）；编辑页先用表单值做预览验证（`verifyConnectionPreview` 带 `existingId` 沿用原 deviceId/secret，或 relay 走 `verifyRelayPreview(existingId)`，均不落盘），**验证成功后才保存**并激活当前设备（验证失败不保存；非当前服务器需先在左侧切换）；**验证成功后自动跳回该服务器的「设备与服务端」详情页**；激活前客户端会先调 verify（服务端要求 verify→activate 顺序，乱序会被 40313 封禁）；离开时保留未保存确认；长文本必须换行/省略，不允许溢出卡片或产生页面横向滚动条
+- **转发 UI（v3）**：左侧服务器列表按 `parentId` 递归成树、用缩进显示层级，点击切换 active；切换/点击当前服务器后会并行验证同一 `rootId` 下的所有服务器（`verify_server`，不切换 active、不激活），圆点绿色=已验证通、灰色=失败/未验证、黄色=检测中；**「设备与服务端」详情页**在「编辑」右侧显示「代理服务器」按钮，只有当前服务器 active 且 `connection.status==="connected"` 才可点击，点击后进入「添加代理服务器」表单；连接成功前不显示代理服务器填写入口。B/C 表单包含「目标地址 + 目标 AppKey/AppSecret + 设备名」。新建 relay 可先 `saveRelay` 落本地，或走 `verifyRelayPreview → saveRelay`（按钮「验证连接」）；编辑已保存 relay 可先 `saveRelay`，也可在验证时先 `verifyRelayPreview(existingId)` 成功后再 `saveRelay`。同一转发链每跳 AppKey 必须不同，重复时服务端返回 40010「转发链 appKey 重复」，客户端验证前会先拦一次。右侧不再重复显示服务器名/转发链说明（层级已在左侧列表中体现）。审计详情「来源/转发链」按 `relayVia` 的 appKey（其次 url）映射本地服务器，可点击切换；找不到时显示纯文本。删除已保存服务器允许删到空配置，新建表单不显示删除。
 - 未配置时：右侧显示 `Empty` + 添加服务器引导；**空配置（`servers=[]`）不再自动补默认服务器**，只有首次安装/空文件才生成默认 direct。
 - 非 Tauri 环境（浏览器打开 vite dev）：捕获 invoke 异常，显示 `Alert`「请使用桌面客户端运行」
 - 不引入多余 UI 框架；图标用 `@ant-design/icons`
@@ -906,7 +931,7 @@ Query：
   JSON 请求体用自定义 `CachedBodyHttpServletRequest` 缓存后计算哈希并向下传递；
   multipart/octet 请求**不得**缓存整个 body，relay 过滤器用 JDK HttpClient 的流式 BodyPublisher 直接桥接原始流
 - `RelayForwardFilter` 在 `DispatcherServlet` 之前执行：弹 `X-Relay-Chain` 第 0 跳、校验与外层签名头一致、追加 `X-Relay-Via`、按剩余链是 `/api/relay` 还是最终原 path 转发；A/B 的 `SignatureFilter` 审计路径仍保留 `/api/relay` 前缀，`AuditAction` 映射为 `relay.*`；设备绑定/限流成本用剥离前缀后的业务路径
-- relay 默认关闭 `app.relay.enabled=false`；`app.relay.*` 配置 `max-hops`、header 字节上限、connect/request/upload 超时、`allow-private-network`、`allow-loopback`、`allowed-hosts`
+- relay 配置默认关闭 `app.relay.enabled=false`；本地 `scripts/run-server.sh`/分包 `start.sh` 默认注入开启；`app.relay.*` 配置 `max-hops`、header 字节上限、connect/request/upload 超时、`allow-private-network`、`allow-loopback`、`allowed-hosts`
 - 非 UTF-8 请求体 → `40000`
 - `/api/health` 与 `OPTIONS` 跳过签名；开启客户端身份强制后，两者仍受 `ClientGuardFilter` 的 MAC/IP 检查约束
 - **SQLite 元数据**：文件/设备元数据持久化在 `<root>/.upload-meta/metadata.sqlite3`（旧 `files.json`/`devices.json` 自动迁移备份），

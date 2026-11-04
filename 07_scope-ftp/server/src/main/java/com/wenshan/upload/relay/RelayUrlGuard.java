@@ -18,7 +18,7 @@ import java.util.Locale;
  * {@code allowed-hosts} 非空时作为 host（或 host:port）白名单。</p>
  *
  * <p>残余风险：DNS rebinding 与「持有 A 凭据的客户端把 A 当代理」由 relay 默认关闭 +
- * 可选 host 白名单缓解，P2 再加固。</p>
+ * 可选 host 白名单缓解，P2 再加固；本地启动脚本会默认开启，仅在开发/受控网络使用。</p>
  */
 @Component
 public class RelayUrlGuard {

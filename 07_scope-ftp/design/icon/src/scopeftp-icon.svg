@@ -1,0 +1,14 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="back" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#F8FBFF"/><stop offset="1" stop-color="#E1EDFF"/></linearGradient>
+  <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#EAF3FF"/></linearGradient>
+  <linearGradient id="fold" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#061023" stop-opacity="0.08"/>
+    <stop offset="1" stop-color="#061023" stop-opacity="0"/></linearGradient>
+  <linearGradient id="accent" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#2E6BFF"/><stop offset="1" stop-color="#0E86D6"/></linearGradient>
+  <clipPath id="frontClip"><rect x="288" y="486" width="432" height="238" rx="36"/></clipPath>
+</defs><g transform="translate(512 512) scale(1.15) translate(-512 -512)"><g transform="translate(0 -22)"><g fill="none" stroke="url(#front)" stroke-width="16" stroke-linecap="round"><path d="M 262 410 V 356 a 16 16 0 0 1 16 -16 H 332"/><path d="M 746 410 V 356 a 16 16 0 0 0 -16 -16 H 676"/><path d="M 262 646 V 700 a 16 16 0 0 0 16 16 H 332"/><path d="M 746 646 V 700 a 16 16 0 0 1 -16 16 H 676"/></g><path d="M 288 690 V 400 a 34 34 0 0 1 34 -34 H 470 a 34 34 0 0 1 34 34 L 528 436 H 686 a 34 34 0 0 1 34 34 V 690 a 34 34 0 0 1 -34 34 H 322 a 34 34 0 0 1 -34 -34 Z" fill="url(#back)"/><rect x="288" y="486" width="432" height="238" rx="36" fill="url(#front)"/><g clip-path="url(#frontClip)"><rect x="288" y="486" width="432" height="46" fill="url(#fold)"/></g><path d="M 448 500 L 504 560 H 462 V 676 H 434 V 560 H 392 Z" fill="url(#accent)"/><path d="M 576 688 L 520 628 H 562 V 512 H 590 V 628 H 632 Z" fill="url(#accent)"/></g></g>
+</svg>

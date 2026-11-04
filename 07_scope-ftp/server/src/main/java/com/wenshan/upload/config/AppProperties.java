@@ -520,12 +520,12 @@ public class AppProperties implements InitializingBean {
     }
 
     /**
-     * 多级转发（{@code /api/relay}）配置。默认关闭，按环境显式开启；
+     * 多级转发（{@code /api/relay}）配置。配置默认关闭，由启动脚本按需注入开启；
      * B/C 常在内网，因此默认允许私网地址，loopback/link-local/元数据地址默认拒绝。
      */
     public static class Relay {
 
-        /** 是否开启 /api/relay；默认关闭，部署时显式开启。 */
+        /** 是否开启 /api/relay；配置默认关闭，启动脚本会注入开启参数。 */
         private boolean enabled = false;
 
         /** 链最多多少跳（含根），默认 16。 */

@@ -205,6 +205,20 @@ pub struct CopyResult {
     pub name: String,
 }
 
+/// `POST /api/files/create` 的响应：新建文件/文件夹的根、相对路径、类型与名称。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateResult {
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default, rename = "type")]
+    pub entry_type: String,
+    #[serde(default)]
+    pub name: String,
+}
+
 /// `POST /api/files/move` 的响应（task-40：移动文件/目录，可跨根）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -458,6 +472,35 @@ fn rename_request(
     Ok(("/api/files/rename", body))
 }
 
+/// 构造 `POST /api/files/create` 的 JSON 请求体：在 parent 目录下新建空文件/文件夹。
+///
+/// `parent=""` 表示存储根目录；`kind` 只接受 `file` / `directory`；`root` 放 JSON 体参与 payloadHash。
+fn create_request(
+    parent: &str,
+    name: &str,
+    kind: &str,
+    root: Option<&str>,
+) -> Result<(&'static str, Vec<u8>), String> {
+    let parent = normalize_target_dir(parent);
+    let name = validate_entry_name(name)?;
+    let kind = kind.trim().to_ascii_lowercase();
+    if kind != "file" && kind != "directory" {
+        return Err("类型必须是 file 或 directory".to_string());
+    }
+    let mut payload = json!({
+        "name": name,
+        "type": kind,
+    });
+    if !parent.is_empty() {
+        payload["parent"] = Value::String(parent);
+    }
+    if let Some(root) = normalize_root(root) {
+        payload["root"] = Value::String(root);
+    }
+    let body = serde_json::to_vec(&payload).map_err(|e| format!("请求体序列化失败：{e}"))?;
+    Ok(("/api/files/create", body))
+}
+
 /// 构造 `POST /api/files/copy` 的 JSON 请求体（task-40）。
 fn copy_request(path: &str, root: Option<&str>) -> Result<(&'static str, Vec<u8>), String> {
     let path = path.trim();
@@ -673,120 +716,23 @@ pub fn open_temp_path(path: &str) -> Result<PathBuf, String> {
     Ok(dir.join(open_temp_file_name(path)))
 }
 
-/// 「打开方式」目标应用（task-27）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenApplication {
-    Default,
-    VsCode,
-    TextEdit,
-    Notepad,
-    Choose,
-}
-
-impl OpenApplication {
-    /// 解析前端传入的 application 字符串；未知值返回中文错误。
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value.trim() {
-            "default" => Ok(Self::Default),
-            "vscode" => Ok(Self::VsCode),
-            "textedit" => Ok(Self::TextEdit),
-            "notepad" => Ok(Self::Notepad),
-            "choose" => Ok(Self::Choose),
-            other => Err(format!("不支持的打开方式：{other}")),
-        }
-    }
-}
-
-/// macOS `choose application` 脚本：弹系统应用选择器，再用所选应用打开文件。
-#[cfg(target_os = "macos")]
-const MAC_CHOOSE_SCRIPT: &str = r#"on run argv
-  set appPath to POSIX path of (choose application with prompt "选择打开方式")
-  do shell script "open -a " & quoted form of appPath & " " & quoted form of (item 1 of argv)
-end run"#;
-
-/// 返回各平台「用指定应用打开文件」的命令（便于单测，不实际启动应用）。
-fn open_command_parts(
-    path: &Path,
-    application: OpenApplication,
-) -> Result<(String, Vec<String>), String> {
+/// 用系统默认应用打开本地文件；只负责拉起进程，不等待应用退出。
+pub fn open_with_default_app(path: &Path) -> Result<(), String> {
     let target = path.to_string_lossy().into_owned();
-    #[cfg(target_os = "macos")]
-    {
-        let (program, args): (&str, Vec<String>) = match application {
-            OpenApplication::Default => ("open", vec![target]),
-            OpenApplication::VsCode => (
-                "open",
-                vec!["-a".to_string(), "Visual Studio Code".to_string(), target],
-            ),
-            // macOS 没有「记事本」，文本类应用统一用 TextEdit。
-            OpenApplication::TextEdit | OpenApplication::Notepad => (
-                "open",
-                vec!["-a".to_string(), "TextEdit".to_string(), target],
-            ),
-            OpenApplication::Choose => (
-                "osascript",
-                vec!["-e".to_string(), MAC_CHOOSE_SCRIPT.to_string(), target],
-            ),
-        };
-        Ok((program.to_string(), args))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let (program, args): (&str, Vec<String>) = match application {
-            OpenApplication::Default => (
-                "cmd",
-                vec![
-                    "/c".to_string(),
-                    "start".to_string(),
-                    "".to_string(),
-                    target,
-                ],
-            ),
-            OpenApplication::VsCode => ("code", vec![target]),
-            OpenApplication::TextEdit | OpenApplication::Notepad => ("notepad", vec![target]),
-            OpenApplication::Choose => (
-                "rundll32",
-                vec!["shell32.dll,OpenAs_RunDLL".to_string(), target],
-            ),
-        };
-        Ok((program.to_string(), args))
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        let (program, args): (&str, Vec<String>) = match application {
-            OpenApplication::Default => ("xdg-open", vec![target]),
-            OpenApplication::VsCode => ("code", vec![target]),
-            OpenApplication::TextEdit | OpenApplication::Notepad => ("gedit", vec![target]),
-            OpenApplication::Choose => {
-                return Err("当前系统不支持选择打开方式".to_string());
-            }
-        };
-        Ok((program.to_string(), args))
-    }
-}
-
-/// 用指定应用打开本地文件；只负责拉起进程，不等待应用退出。
-pub fn open_with_application(path: &Path, application: OpenApplication) -> Result<(), String> {
-    let (program, args) = open_command_parts(path, application)?;
-    Command::new(&program)
-        .args(&args)
+    let mut command = if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("cmd");
+        command.args(["/c", "start", ""]);
+        command
+    } else {
+        Command::new("xdg-open")
+    };
+    command
+        .arg(target)
         .spawn()
         .map(|_| ())
-        .map_err(|error| match application {
-            OpenApplication::Default => format!("无法用默认应用打开文件：{error}"),
-            OpenApplication::VsCode => {
-                format!("未找到 VS Code（请确认已安装并加入 PATH）：{error}")
-            }
-            OpenApplication::TextEdit | OpenApplication::Notepad => {
-                format!("无法用文本应用打开文件：{error}")
-            }
-            OpenApplication::Choose => format!("无法打开应用选择器：{error}"),
-        })
-}
-
-/// 用系统默认应用打开本地文件。
-pub fn open_with_default_app(path: &Path) -> Result<(), String> {
-    open_with_application(path, OpenApplication::Default)
+        .map_err(|error| format!("无法用默认应用打开文件：{error}"))
 }
 
 /// `X-Relay-Chain` 数组项：一条转发链上的一跳（顺序 root → target）。
@@ -1684,6 +1630,23 @@ impl Api {
             .await
     }
 
+    /// `POST /api/files/create`：在指定目录新建空文件或文件夹。
+    ///
+    /// `parent` 为空/空白表示存储根目录；`kind` 只接受 `file` / `directory`。
+    /// 不覆盖已存在目标；错误 message 原样透传。
+    pub async fn create_server_entry(
+        &self,
+        parent: &str,
+        name: &str,
+        kind: &str,
+        root: Option<&str>,
+    ) -> Result<CreateResult, String> {
+        self.require_configured()?;
+        let (target, body) = create_request(parent, name, kind, root)?;
+        self.send_json_once::<CreateResult>(Method::POST, target, Some(&body))
+            .await
+    }
+
     /// `POST /api/files/copy`：原地拷贝文件/目录（task-40）。
     ///
     /// 服务端负责生成 `xxx_副本` / `xxx_副本 (1)` 等新名称；错误 message 原样透传。
@@ -1875,16 +1838,16 @@ fn api_error(code: i64, message: &str) -> String {
         40101 => "请求已过期，请检查本机时间",
         40102 => "请求重复，请重试",
         40103 => "客户端未授权，请检查 AppKey",
-        40110 => "转发目标鉴权失败",
+        40110 => "代理服务器鉴权失败",
         40300 => "设备未授权，请重新激活",
         40320 => "转发功能未开启",
         40400 => "资源不存在",
         42900 => "请求过于频繁，请稍后重试",
         50000 => "服务器内部错误",
-        50210 => "转发目标不可达",
-        50211 => "转发目标返回异常",
-        50212 => "转发目标拒绝来源身份",
-        50410 => "转发目标超时",
+        50210 => "代理服务器不可达",
+        50211 => "代理服务器返回异常",
+        50212 => "代理服务器拒绝来源身份",
+        50410 => "代理服务器超时",
         _ => {
             if message.trim().is_empty() {
                 return format!("请求失败（code={code}）");
@@ -1947,7 +1910,7 @@ fn network_error(error: reqwest::Error) -> String {
 
 /// 错误是否值得重试（网络抖动 / 超时 / 限流 / 5xx）。
 ///
-/// relay 相关错误（转发链无效/转发目标鉴权失败/不可达/拒绝来源/超时）不自动重试：
+/// relay 相关错误（转发链无效/代理服务器鉴权失败/不可达/拒绝来源/超时）不自动重试：
 /// 中转节点不做自动重试，写请求重试可能造成重复写。
 pub fn is_retryable_error(message: &str) -> bool {
     for code in [
@@ -1959,12 +1922,12 @@ pub fn is_retryable_error(message: &str) -> bool {
     }
     for text in [
         "转发链无效",
-        "转发目标鉴权失败",
+        "代理服务器鉴权失败",
         "转发功能未开启",
-        "转发目标不可达",
-        "转发目标返回异常",
-        "转发目标拒绝来源身份",
-        "转发目标超时",
+        "代理服务器不可达",
+        "代理服务器返回异常",
+        "代理服务器拒绝来源身份",
+        "代理服务器超时",
     ] {
         if message.contains(text) {
             return false;
@@ -2110,6 +2073,52 @@ mod tests {
             );
         }
         assert!(rename_request("", "b.txt", None).is_err(), "空路径应被拒绝");
+    }
+
+    #[test]
+    fn create_request_builds_signed_json_body() {
+        let (target, body) =
+            create_request("docs/sub", "  new.txt  ", "file", Some("work")).expect("新建文件请求");
+        assert_eq!(target, "/api/files/create");
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["parent"], "docs/sub");
+        assert_eq!(json["name"], "new.txt", "名称应 trim");
+        assert_eq!(json["type"], "file");
+        assert_eq!(json["root"], "work");
+
+        let (_, root_body) = create_request("", "folder", "directory", None).expect("根目录新建");
+        let root_json: Value = serde_json::from_slice(&root_body).unwrap();
+        assert!(root_json.get("parent").is_none(), "根目录不携带 parent");
+        assert!(root_json.get("root").is_none(), "默认根不携带 root");
+        assert_eq!(root_json["type"], "directory");
+
+        for bad_kind in ["symlink", "", "FILE/DIR"] {
+            assert!(
+                create_request("", "x", bad_kind, None).is_err(),
+                "非法类型应拒绝"
+            );
+        }
+        for bad_name in ["", "   ", ".", "..", "a/b", "a\\b"] {
+            assert!(
+                create_request("", bad_name, "file", None).is_err(),
+                "非法名称应拒绝"
+            );
+        }
+    }
+
+    #[test]
+    fn create_result_maps_type_to_frontend_shape() {
+        let result: CreateResult = serde_json::from_value(json!({
+            "root": "work",
+            "path": "docs/new.txt",
+            "type": "file",
+            "name": "new.txt"
+        }))
+        .expect("解析新建响应");
+        assert_eq!(result.entry_type, "file");
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["type"], "file");
+        assert!(wire.get("entryType").is_none(), "前端只认 type");
     }
 
     #[test]
@@ -2323,46 +2332,6 @@ mod tests {
     }
 
     #[test]
-    fn open_application_parses_known_values() {
-        for value in ["default", "vscode", "textedit", "notepad", "choose"] {
-            assert!(OpenApplication::parse(value).is_ok(), "{value} 应解析成功");
-        }
-        assert_eq!(
-            OpenApplication::parse("default").unwrap(),
-            OpenApplication::Default
-        );
-        assert_eq!(
-            OpenApplication::parse("vscode").unwrap(),
-            OpenApplication::VsCode
-        );
-        let error = OpenApplication::parse("photoshop").unwrap_err();
-        assert!(error.contains("不支持的打开方式"), "{error}");
-    }
-
-    #[test]
-    fn open_command_parts_targets_downloaded_file() {
-        let path = PathBuf::from("/tmp/scop-ftp-open/报告.pdf");
-        let (program, args) = open_command_parts(&path, OpenApplication::Default).unwrap();
-        assert!(!program.is_empty(), "打开命令不能为空");
-        assert!(
-            args.iter().any(|arg| arg.contains("报告.pdf")),
-            "打开命令参数应包含目标文件: {args:?}"
-        );
-        let (vscode_program, vscode_args) =
-            open_command_parts(&path, OpenApplication::VsCode).unwrap();
-        assert!(!vscode_program.is_empty());
-        assert!(vscode_args.iter().any(|arg| arg.contains("报告.pdf")));
-        // 选择其他应用由系统选择器负责，也必须带上目标文件。
-        #[cfg(not(target_os = "linux"))]
-        {
-            let (choose_program, choose_args) =
-                open_command_parts(&path, OpenApplication::Choose).unwrap();
-            assert!(!choose_program.is_empty());
-            assert!(choose_args.iter().any(|arg| arg.contains("报告.pdf")));
-        }
-    }
-
-    #[test]
     fn retryable_errors_are_classified() {
         for message in [
             "网络错误：请求超时，请检查服务器地址与网络",
@@ -2509,7 +2478,7 @@ mod tests {
                  "sessionId":null,"terminalCommand":null,"body":"{\"path\":\"a.txt\"}",
                  "contentSha256":"abc","requestBytes":12,"responseBytes":34,
                  "durationMs":5,"httpStatus":200,"success":true,"error":null,
-                 "userAgent":"ScopeFTP-client/0.1.0","fileName":"a.txt"}
+                 "userAgent":"ScopeFTP/0.1.0","fileName":"a.txt"}
             ],"total":1,"page":2,"size":50,"hasMore":true}"#,
         )
         .expect("解析 audit 响应");
@@ -2765,9 +2734,9 @@ mod tests {
             return;
         }
         let work_root = std::env::var("LIVE_COPY_MOVE_WORK_ROOT")
-            .unwrap_or_else(|_| "/tmp/scop-ftp-client/work".to_string());
+            .unwrap_or_else(|_| "/tmp/scopeftp/work".to_string());
         let media_root = std::env::var("LIVE_COPY_MOVE_MEDIA_ROOT")
-            .unwrap_or_else(|_| "/tmp/scop-ftp-client/media".to_string());
+            .unwrap_or_else(|_| "/tmp/scopeftp/media".to_string());
         let work = std::path::Path::new(&work_root);
         let media = std::path::Path::new(&media_root);
         std::fs::create_dir_all(work.join("target-dir")).expect("创建 work/target-dir");
@@ -3356,7 +3325,7 @@ mod tests {
     #[test]
     fn relay_errors_map_to_chinese_and_are_not_retried() {
         assert_eq!(api_error(40010, ""), "转发链无效");
-        assert!(api_error(50210, "目标 B 不可达").contains("转发目标不可达"));
+        assert!(api_error(50210, "目标 B 不可达").contains("代理服务器不可达"));
         for code in [40010, 40110, 40320, 50210, 50211, 50212, 50410] {
             let message = api_error(code, "");
             assert!(!message.is_empty());

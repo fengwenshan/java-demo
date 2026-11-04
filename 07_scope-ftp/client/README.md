@@ -1,6 +1,6 @@
-# ScopeFTP-client · 桌面客户端
+# ScopeFTP · 桌面客户端
 
-Tauri 2 + React 18 + TypeScript + Vite 6 + Ant Design 5 桌面客户端，产品名 `ScopeFTP`，安装包/二进制名 `ScopeFTP-client`。
+Tauri 2 + React 18 + TypeScript + Vite 6 + Ant Design 5 桌面客户端，产品名、安装包和二进制名统一为 `ScopeFTP`。
 所有网络请求、HMAC-SHA256 签名、文件读写都在 Rust 侧完成，WebView 拿不到 `appSecret`。
 
 功能包括：FTP 式目录浏览/上传/下载/删除、拷贝移动、在线编辑（Monaco）、zip 解压、远程终端，以及顶栏日志抽屉（操作/连接日志合并视图，类型/操作/成功失败/时间筛选、服务端分页、详情查看）。
@@ -62,7 +62,7 @@ client/
 │   │   ├── commands.rs    Tauri 命令（契约 5.2）
 │   │   └── lib.rs         Builder / 状态 / 命令注册
 │   ├── capabilities/default.json   core:default + dialog:allow-open/save
-│   └── tauri.conf.json    productName/mainBinaryName=ScopeFTP-client，窗口标题 ScopeFTP，identifier com.scopftp.client
+│   └── tauri.conf.json    productName/mainBinaryName=ScopeFTP，窗口标题 ScopeFTP，identifier com.scopftp.client
 └── ...
 ```
 

@@ -1,5 +1,5 @@
 {
-  "name": "scop-ftp-client",
+  "name": "scopeftp",
   "private": true,
   "version": "0.1.0",
   "type": "module",

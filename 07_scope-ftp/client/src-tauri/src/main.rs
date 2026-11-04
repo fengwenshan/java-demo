@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    scop_ftp_client_lib::run()
+    scopeftp_lib::run()
 }

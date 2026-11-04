@@ -7,6 +7,9 @@
 # AppSecret 任意非空即可，不是只能填 32 字节；少于 32 字符服务端只警告。生产推荐：
 #   APP_SECRET="$(openssl rand -hex 32)"
 #
+# 多级转发默认开启：本脚本会自动追加 --app.relay.enabled=true，不需要手动配置；
+# 要关闭时显式传 --app.relay.enabled=false（直接 java -jar 启动仍按配置文件，默认关闭）。
+#
 # 用法：
 #   ./scripts/run-server.sh [--env <环境名>] [--build] [--app-key KEY] [--app-secret SECRET] [其它 Spring Boot 参数...]
 #
@@ -41,7 +44,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --help|-h)
-      sed -n '2,16p' "$0"
+      sed -n '2,20p' "$0"
       exit 0
       ;;
     *)
@@ -50,6 +53,19 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# 本地启动默认开启多级转发；用户显式传 --app.relay.enabled=false 时不覆盖。
+RELAY_DEFAULTED=0
+RELAY_ARG_PRESENT=0
+for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
+  case "$arg" in
+    --app.relay.enabled|--app.relay.enabled=*) RELAY_ARG_PRESENT=1 ;;
+  esac
+done
+if [[ "$RELAY_ARG_PRESENT" -eq 0 ]]; then
+  PASSTHROUGH+=("--app.relay.enabled=true")
+  RELAY_DEFAULTED=1
+fi
 
 # 先确定环境，再加载对应 env 配置文件：
 # env.local.<env> → env.<env> → env.local → env（后者覆盖前者，详见 scripts/env.sh）。
@@ -195,6 +211,11 @@ if [[ -n "$CLI_APP_SECRET" ]]; then
   echo "    AppSecret：命令行传入"
 else
   echo "    AppSecret：环境变量传入"
+fi
+if [[ "$RELAY_DEFAULTED" -eq 1 ]]; then
+  echo "    Relay：默认开启（脚本注入 --app.relay.enabled=true）"
+else
+  echo "    Relay：按 --app.relay.enabled 参数"
 fi
 echo "    健康检查：curl -H 'X-Device-Mac: 02:00:00:00:00:01' http://127.0.0.1:${PORT}/api/health"
 if [[ ${#PASSTHROUGH[@]} -gt 0 ]]; then

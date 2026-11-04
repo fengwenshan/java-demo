@@ -121,8 +121,8 @@ impl UploadStore {
     /// 读取状态文件；文件不存在或内容损坏时返回空集合（不阻断上传）。
     pub fn load(path: &Path) -> Result<Self, String> {
         let records = if path.exists() {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("读取续传状态失败：{e}"))?;
+            let content =
+                std::fs::read_to_string(path).map_err(|e| format!("读取续传状态失败：{e}"))?;
             if content.trim().is_empty() {
                 Vec::new()
             } else {
@@ -421,7 +421,11 @@ where
                         status.received.len(),
                         dir_label
                     );
-                    session = Some((record.upload_id.clone(), chunk_size, status.received.clone()));
+                    session = Some((
+                        record.upload_id.clone(),
+                        chunk_size,
+                        status.received.clone(),
+                    ));
                 } else {
                     // 服务端会话信息与本地文件不一致：丢弃旧会话重新开始。
                     let _ = api.cancel_chunked_upload(&record.upload_id).await;
@@ -589,9 +593,7 @@ where
                 Err(err) => {
                     let retryable = api::is_retryable_error(&err);
                     if retryable && attempt < MAX_CHUNK_ATTEMPTS {
-                        eprintln!(
-                            "分片 {index} 上传失败（第 {attempt} 次尝试，将重试）：{err}"
-                        );
+                        eprintln!("分片 {index} 上传失败（第 {attempt} 次尝试，将重试）：{err}");
                         last_error = Some(err);
                         tokio::time::sleep(Duration::from_millis(300 * attempt as u64)).await;
                         continue;
@@ -693,7 +695,10 @@ mod tests {
         assert_eq!(missing_chunks(total, &[1, 1, 99]), vec![0, 2]);
 
         assert_eq!(received_bytes(size, chunk, &[0]), chunk);
-        assert_eq!(received_bytes(size, chunk, &[0, 2]), chunk + (size - 2 * chunk));
+        assert_eq!(
+            received_bytes(size, chunk, &[0, 2]),
+            chunk + (size - 2 * chunk)
+        );
         assert_eq!(received_bytes(size, chunk, &[99]), 0);
     }
 
@@ -744,19 +749,59 @@ mod tests {
 
         // 不同 server / dir / name / size / mtime / sha 都不匹配
         assert!(store
-            .find("server-2", None, Some("docs"), "a.bin", 100, 1_760_000_000_000, "abc123")
+            .find(
+                "server-2",
+                None,
+                Some("docs"),
+                "a.bin",
+                100,
+                1_760_000_000_000,
+                "abc123"
+            )
             .is_none());
         assert!(store
-            .find("server-1", None, Some("other"), "a.bin", 100, 1_760_000_000_000, "abc123")
+            .find(
+                "server-1",
+                None,
+                Some("other"),
+                "a.bin",
+                100,
+                1_760_000_000_000,
+                "abc123"
+            )
             .is_none());
         assert!(store
-            .find("server-1", None, Some("docs"), "a.bin", 101, 1_760_000_000_000, "abc123")
+            .find(
+                "server-1",
+                None,
+                Some("docs"),
+                "a.bin",
+                101,
+                1_760_000_000_000,
+                "abc123"
+            )
             .is_none());
         assert!(store
-            .find("server-1", None, Some("docs"), "a.bin", 100, 1_760_000_000_001, "abc123")
+            .find(
+                "server-1",
+                None,
+                Some("docs"),
+                "a.bin",
+                100,
+                1_760_000_000_001,
+                "abc123"
+            )
             .is_none());
         assert!(store
-            .find("server-1", None, Some("docs"), "a.bin", 100, 1_760_000_000_000, "different")
+            .find(
+                "server-1",
+                None,
+                Some("docs"),
+                "a.bin",
+                100,
+                1_760_000_000_000,
+                "different"
+            )
             .is_none());
 
         // 根目录：None 与 Some("") 等价
@@ -809,10 +854,27 @@ mod tests {
         assert_eq!(store.records().len(), 1, "同一文件应替换而非追加");
         assert_eq!(store.records()[0].upload_id, "upload-a-2");
 
-        assert_eq!(store.remove("server-1", None, Some("docs"), "a.bin", 100, 1_760_000_000_000), 1);
+        assert_eq!(
+            store.remove(
+                "server-1",
+                None,
+                Some("docs"),
+                "a.bin",
+                100,
+                1_760_000_000_000
+            ),
+            1
+        );
         assert!(store.is_empty());
         assert_eq!(
-            store.remove("server-1", None, Some("docs"), "missing.bin", 100, 1_760_000_000_000),
+            store.remove(
+                "server-1",
+                None,
+                Some("docs"),
+                "missing.bin",
+                100,
+                1_760_000_000_000
+            ),
             0
         );
 
@@ -905,23 +967,54 @@ mod tests {
         let mut store = UploadStore::load(&path).unwrap();
         // 同 server/dir/name/size/mtime，不同 root 必须各自命中自己的记录。
         let work = store
-            .find("server-1", Some("work"), Some("docs"), "a.bin", 100, 1_760_000_000_000, "abc123")
+            .find(
+                "server-1",
+                Some("work"),
+                Some("docs"),
+                "a.bin",
+                100,
+                1_760_000_000_000,
+                "abc123",
+            )
             .expect("root=work 应命中");
         assert_eq!(work.upload_id, "upload-a");
         assert!(
             store
-                .find("server-1", Some("media"), Some("docs"), "a.bin", 100, 1_760_000_000_000, "abc123")
+                .find(
+                    "server-1",
+                    Some("media"),
+                    Some("docs"),
+                    "a.bin",
+                    100,
+                    1_760_000_000_000,
+                    "abc123"
+                )
                 .is_none(),
             "root=media 不应命中 root=work 的记录"
         );
         // 不传 root（默认根）也不应命中明确指定了 root 的记录。
         assert!(store
-            .find("server-1", None, Some("docs"), "a.bin", 100, 1_760_000_000_000, "abc123")
+            .find(
+                "server-1",
+                None,
+                Some("docs"),
+                "a.bin",
+                100,
+                1_760_000_000_000,
+                "abc123"
+            )
             .is_none());
 
         // 删除也必须带 root，不得误删其它根的记录。
         assert_eq!(
-            store.remove("server-1", Some("work"), Some("docs"), "a.bin", 100, 1_760_000_000_000),
+            store.remove(
+                "server-1",
+                Some("work"),
+                Some("docs"),
+                "a.bin",
+                100,
+                1_760_000_000_000
+            ),
             1
         );
         assert_eq!(store.records().len(), 1);
@@ -941,7 +1034,10 @@ mod tests {
             store.upsert(record);
         }
         store.save().unwrap();
-        assert!(!path.with_extension("json.tmp").exists(), "临时文件应被重命名");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "临时文件应被重命名"
+        );
 
         let store = UploadStore::load(&path).unwrap();
         assert_eq!(store.records().len(), 5);

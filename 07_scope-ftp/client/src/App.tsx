@@ -8,6 +8,7 @@ import {
   listStorageRoots,
   setActiveServer,
   verifyConnection,
+  verifyServer,
 } from "./api";
 import type {
   ConfigView,
@@ -18,14 +19,15 @@ import type {
 } from "./types";
 import ServerSidebar from "./components/ServerSidebar";
 import ServerBrowser from "./pages/ServerBrowser";
+import ServerDetailPage from "./pages/ServerDetailPage";
 import SettingsPage from "./pages/SettingsPage";
 
 const { Content } = Layout;
 const { Text } = Typography;
 
-type ViewKey = "browser" | "settings";
+type ViewKey = "browser" | "settings" | "detail";
 
-/** 设置页当前编辑的对象：新建 / 编辑某台服务器 / 在父服务器下新建转发目标。 */
+/** 设置页当前编辑的对象：新建 / 编辑某台服务器 / 在父服务器下新建代理服务器。 */
 type SettingsTarget =
   | { kind: "new" }
   | { kind: "edit"; id: string }
@@ -34,9 +36,11 @@ type SettingsTarget =
 
 export default function App() {
   const { message, modal } = AntdApp.useApp();
-  /** 右侧内容：目录浏览（默认）或设置。 */
+  /** 右侧内容：目录浏览（默认）、设备与服务端详情或设置。 */
   const [view, setView] = useState<ViewKey>("browser");
   const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>(null);
+  /** 详情页展示的服务器 id（只读查看，不一定切换为当前服务器）。 */
+  const [detailServerId, setDetailServerId] = useState<string | null>(null);
   /** 设置页有未保存修改时，离开前拦截并提示（避免“填完没保存”的误解）。 */
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [config, setConfig] = useState<ConfigView | null>(null);
@@ -45,12 +49,40 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({
     status: "checking",
   });
+  /** 左侧同组服务器（当前根节点下所有 direct/relay）的连通性。 */
+  const [serverHealth, setServerHealth] = useState<
+    Record<string, ConnectionState>
+  >({});
+  const healthSeqRef = useRef(0);
+  const refreshSeqRef = useRef(0);
   const [verify, setVerify] = useState<VerifyResult | null>(null);
   /** 当前服务器的存储根列表（task-16）；旧单根服务端为空，rootId 保持 null。 */
   const [roots, setRoots] = useState<StorageRoot[]>([]);
   const [activeRootId, setActiveRootId] = useState<string | null>(null);
   /** 每台服务器记住上次选择的存储根（仅内存，重启后回到 defaultRootId）。 */
   const rootByServerRef = useRef<Record<string, string>>({});
+
+  // 全局关闭 WebView 默认右键菜单（Reload / Inspect Element 等）；
+  // 输入框、文本域和可编辑区域保留系统编辑菜单（复制/粘贴）。
+  useEffect(() => {
+    const handleContextMenu = (event: MouseEvent) => {
+      const target = event.target;
+      const editable =
+        target instanceof Element &&
+        Boolean(
+          target.closest(
+            'input, textarea, [contenteditable="true"], [contenteditable=""], .monaco-editor',
+          ),
+        );
+      if (!editable) {
+        event.preventDefault();
+      }
+    };
+    document.addEventListener("contextmenu", handleContextMenu, true);
+    return () => {
+      document.removeEventListener("contextmenu", handleContextMenu, true);
+    };
+  }, []);
 
   const activeServer: ServerView | null =
     config?.activeServer ??
@@ -69,12 +101,18 @@ export default function App() {
         null)
       : null;
 
-  /** 新建转发目标时的父服务器（A/B/C）。 */
+  /** 新建代理服务器时的父服务器（A/B/C）。 */
   const relayParent: ServerView | null =
     settingsTarget?.kind === "newRelay"
       ? (config?.servers.find(
           (server) => server.id === settingsTarget.parentId,
         ) ?? null)
+      : null;
+
+  /** 详情页展示的服务器；配置里找不到时（例如刚被删除）为 null。 */
+  const detailServer: ServerView | null =
+    view === "detail" && detailServerId
+      ? (config?.servers.find((server) => server.id === detailServerId) ?? null)
       : null;
 
   /** 拉取当前服务器的存储根；旧服务端没有该接口时静默回退单根模式。 */
@@ -100,12 +138,45 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * 检测当前 active 所在整组服务器：同一 rootId 下的所有服务器。
+   * active 也会再验一次；即使主连接流程短暂失败，只要这台服务器实际可达，
+   * 圆点仍可通过这次检测恢复为绿色。
+   */
+  const runGroupHealth = useCallback(async (next: ConfigView, rootId: string) => {
+    if (!isTauri() || !rootId) return;
+    const group = next.servers.filter((server) => server.rootId === rootId);
+    if (group.length === 0) return;
+    const seq = ++healthSeqRef.current;
+    setServerHealth((prev) => {
+      const updated = { ...prev };
+      for (const server of group) {
+        updated[server.id] = { status: "checking" };
+      }
+      return updated;
+    });
+    await Promise.all(
+      group.map(async (server) => {
+        let status: ConnectionState;
+        try {
+          await verifyServer(server.id);
+          status = { status: "connected" };
+        } catch (error) {
+          status = { status: "failed", message: errorMessage(error) };
+        }
+        if (seq !== healthSeqRef.current) return;
+        setServerHealth((prev) => ({ ...prev, [server.id]: status }));
+      }),
+    );
+  }, []);
+
   const refreshConnection = useCallback(async (next: ConfigView) => {
     if (!isTauri()) {
       setBrowserMode(true);
       setConnection({ status: "failed", message: "请使用桌面客户端运行" });
       return;
     }
+    const seq = ++refreshSeqRef.current;
     const server =
       next.activeServer ??
       next.servers.find((item) => item.id === next.activeServerId) ??
@@ -131,21 +202,26 @@ export default function App() {
     setConnection({ status: "checking" });
     try {
       const data = await verifyConnection();
+      if (seq !== refreshSeqRef.current) return;
       setVerify(data);
       setConnection({
         status: "connected",
         message: `已连接：${data.name || next.appKey}`,
       });
       await refreshRoots(server.id);
+      if (seq !== refreshSeqRef.current) return;
+      void runGroupHealth(next, server.rootId);
     } catch (error) {
+      if (seq !== refreshSeqRef.current) return;
       const text = errorMessage(error);
       setVerify(null);
       setRoots([]);
       setActiveRootId(null);
       setConnection({ status: "failed", message: text });
       message.error(text);
+      void runGroupHealth(next, server.rootId);
     }
-  }, [message, refreshRoots]);
+  }, [message, refreshRoots, runGroupHealth]);
 
   useEffect(() => {
     let cancelled = false;
@@ -207,6 +283,8 @@ export default function App() {
         if (id === config.activeServerId) {
           setSettingsTarget(null);
           setView("browser");
+          // 点击当前服务器也重新检测整组（用户常用它手动刷新连通性）。
+          void refreshConnection(config);
           return;
         }
         void (async () => {
@@ -249,7 +327,7 @@ export default function App() {
     });
   }, [withLeaveGuard]);
 
-  /** 在父服务器下新建转发目标（父必须存在；连接校验在设置页内完成）。 */
+  /** 在父服务器下新建代理服务器（父必须存在；连接校验在设置页内完成）。 */
   const handleAddRelay = useCallback(
     (parentId: string) => {
       if (!config?.servers.some((server) => server.id === parentId)) {
@@ -272,6 +350,20 @@ export default function App() {
       });
     },
     [withLeaveGuard],
+  );
+
+  /** 直接切到详情页（保存成功后调用，此时没有未保存修改，不需要离开确认）。 */
+  const openDetailView = useCallback((id: string) => {
+    setDetailServerId(id);
+    setView("detail");
+  }, []);
+
+  /** 从左侧列表打开详情页：在编辑页有未保存修改时先确认。 */
+  const handleOpenDetail = useCallback(
+    (id: string) => {
+      withLeaveGuard(() => openDetailView(id));
+    },
+    [openDetailView, withLeaveGuard],
   );
 
   const handleOpenSettings = useCallback(() => {
@@ -345,14 +437,14 @@ export default function App() {
           config={config}
           activeServer={activeServer}
           connection={connection}
+          serverHealth={serverHealth}
           configured={configured}
           roots={roots}
           activeRootId={activeRoot?.id ?? null}
           onSelectRoot={handleSelectRoot}
           onSelectServer={handleSelectServer}
           onAddServer={handleAddServer}
-          onAddRelay={handleAddRelay}
-          onEditServer={handleEditServer}
+          onOpenDetail={handleOpenDetail}
           onOpenSettings={handleOpenSettings}
         />
       </Layout.Sider>
@@ -402,6 +494,33 @@ export default function App() {
                 onGoSettings={handleOpenSettings}
               />
             )
+          ) : view === "detail" ? (
+            detailServer ? (
+              <ServerDetailPage
+                server={detailServer}
+                isActiveServer={detailServer.id === activeServer?.id}
+                connection={connection}
+                verify={detailServer.id === activeServer?.id ? verify : null}
+                roots={detailServer.id === activeServer?.id ? roots : []}
+                browserMode={browserMode}
+                onEdit={handleEditServer}
+                onBrowseFiles={handleSelectServer}
+                onSelectServer={handleSelectServer}
+                onRecheck={handleRecheck}
+                onAddRelay={handleAddRelay}
+              />
+            ) : (
+              <div className="empty-config" data-testid="server-detail-missing">
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="服务器已不存在"
+                >
+                  <Button type="primary" onClick={handleAddServer}>
+                    添加服务器
+                  </Button>
+                </Empty>
+              </div>
+            )
           ) : (
             <>
               <SettingsPage
@@ -412,17 +531,14 @@ export default function App() {
                   settingsTarget?.kind === "newRelay"
                 }
                 relayParent={relayParent}
-                verify={verify}
                 connection={connection}
                 browserMode={browserMode}
-                roots={roots}
                 onSaved={handleConfigSaved}
                 onDeleted={handleServerDeleted}
                 onVerified={handleVerified}
                 onRecheck={handleRecheck}
                 onDirtyChange={setSettingsDirty}
-                onAddRelay={handleAddRelay}
-                onSelectServer={handleSelectServer}
+                onOpenDetail={openDetailView}
               />
             </>
           )}

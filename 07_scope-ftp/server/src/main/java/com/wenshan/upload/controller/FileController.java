@@ -12,6 +12,8 @@ import com.wenshan.upload.dto.ChunkStatusData;
 import com.wenshan.upload.dto.ContentSaveData;
 import com.wenshan.upload.dto.CopyData;
 import com.wenshan.upload.dto.CopyRequest;
+import com.wenshan.upload.dto.CreateEntryData;
+import com.wenshan.upload.dto.CreateEntryRequest;
 import com.wenshan.upload.dto.ContentSaveRequest;
 import com.wenshan.upload.dto.DeleteResult;
 import com.wenshan.upload.dto.DirListData;
@@ -30,6 +32,7 @@ import com.wenshan.upload.security.SignatureFilter;
 import com.wenshan.upload.service.ChunkUploadService;
 import com.wenshan.upload.service.ContentEditService;
 import com.wenshan.upload.service.DirectoryService;
+import com.wenshan.upload.service.EntryCreateService;
 import com.wenshan.upload.service.FileService;
 import com.wenshan.upload.service.FileTransferService;
 import com.wenshan.upload.service.SearchService;
@@ -79,6 +82,7 @@ public class FileController {
     private final ContentEditService contentEditService;
     private final ZipExtractService zipExtractService;
     private final FileTransferService fileTransferService;
+    private final EntryCreateService entryCreateService;
 
     public FileController(FileService fileService,
                           DirectoryService directoryService,
@@ -86,7 +90,8 @@ public class FileController {
                           SearchService searchService,
                           ContentEditService contentEditService,
                           ZipExtractService zipExtractService,
-                          FileTransferService fileTransferService) {
+                          FileTransferService fileTransferService,
+                          EntryCreateService entryCreateService) {
         this.fileService = fileService;
         this.directoryService = directoryService;
         this.chunkUploadService = chunkUploadService;
@@ -94,6 +99,7 @@ public class FileController {
         this.contentEditService = contentEditService;
         this.zipExtractService = zipExtractService;
         this.fileTransferService = fileTransferService;
+        this.entryCreateService = entryCreateService;
     }
 
     @GetMapping
@@ -258,6 +264,24 @@ public class FileController {
             throw new BizException(ErrorCode.BAD_REQUEST, "缺少请求体");
         }
         return ApiResponse.ok(fileService.rename(appKey, request.root(), request.path(), request.newName()));
+    }
+
+    /**
+     * 在指定目录下新建空文件或文件夹（JSON；签名 payloadHash 为请求体 SHA-256）。
+     * 不覆盖已存在目标，不写 files.json；目标父目录必须已存在。
+     */
+    @PostMapping("/create")
+    public ApiResponse<CreateEntryData> create(
+            @RequestAttribute(SignatureFilter.ATTR_APP_KEY) String appKey,
+            @RequestBody CreateEntryRequest request,
+            HttpServletRequest httpRequest) {
+        if (request == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "缺少请求体");
+        }
+        CreateEntryData data = entryCreateService.create(appKey, request.root(), request.parent(),
+                request.name(), request.type());
+        AuditContext.setFileName(httpRequest, data.name());
+        return ApiResponse.ok(data);
     }
 
     /**

@@ -40,9 +40,11 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  FileAddOutlined,
   FileOutlined,
   FileZipOutlined,
   FolderOutlined,
+  FolderAddOutlined,
   FolderOpenOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
@@ -67,6 +69,7 @@ import {
   listenUploadProgress,
   moveServerPath,
   openServerFile,
+  createServerEntry,
   readServerFileContent,
   pickFile,
   pickSavePath,
@@ -112,6 +115,15 @@ interface MoveDialogState {
   submitting: boolean;
 }
 
+/** 「新建文件/文件夹」弹窗状态。 */
+interface CreateDialogState {
+  /** 新条目所在目录（相对当前根；空串=根目录）。 */
+  targetDir: string;
+  type: "file" | "directory";
+  name: string;
+  submitting: boolean;
+}
+
 /** 日志筛选状态（task-45）。 */
 interface AuditFilters {
   category: AuditLogCategory;
@@ -148,6 +160,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   copy: "拷贝",
   move: "移动",
   extract: "解压",
+  create: "新建",
   "content.read": "读取内容",
   "content.save": "保存内容",
   "terminal.exec": "终端命令",
@@ -165,6 +178,7 @@ const AUDIT_OPERATION_ACTIONS = [
   "copy",
   "move",
   "extract",
+  "create",
   "content.read",
   "content.save",
   "terminal.exec",
@@ -173,11 +187,14 @@ const AUDIT_OPERATION_ACTIONS = [
 /** 连接日志：连接验证、设备激活。 */
 const AUDIT_CONNECTION_ACTIONS = ["auth.verify", "auth.activate"] as const;
 
+/** 转发节点记录的是 relay.xxx 动作，筛选下拉同时给出「本机」和「经转发」两种。 */
 const toAuditOptions = (actions: readonly string[]) =>
-  actions.map((value) => ({
-    value,
-    label: AUDIT_ACTION_LABELS[value] ?? value,
-  }));
+  actions.flatMap((value) =>
+    [value, `relay.${value}`].map((option) => ({
+      value: option,
+      label: auditActionLabel(option),
+    })),
+  );
 
 /** 按日志类型给出操作筛选项；both 时合并展示。 */
 const AUDIT_ACTION_OPTIONS: Record<
@@ -189,8 +206,16 @@ const AUDIT_ACTION_OPTIONS: Record<
   both: toAuditOptions([...AUDIT_OPERATION_ACTIONS, ...AUDIT_CONNECTION_ACTIONS]),
 };
 
+function stripRelayPrefix(action: string | null | undefined): string {
+  return action?.startsWith("relay.") ? action.slice("relay.".length) : action ?? "";
+}
+
 function auditActionLabel(action: string | null | undefined): string {
   if (!action) return "未知操作";
+  if (action.startsWith("relay.")) {
+    const base = stripRelayPrefix(action);
+    return `经转发 · ${AUDIT_ACTION_LABELS[base] ?? base}`;
+  }
   return AUDIT_ACTION_LABELS[action] ?? action;
 }
 
@@ -208,34 +233,35 @@ function formatAuditTime(ts: string | null | undefined): string {
 }
 
 function auditObjectSummary(item: AuditLogItem): string {
+  const action = stripRelayPrefix(item.action);
   const fileName = item.fileName?.trim() || "";
   const pathParam = item.pathParam?.trim() || "";
   const targetDir = item.targetDir?.trim() || "";
   const targetRoot = item.targetRoot?.trim() || "";
   const command = item.terminalCommand?.trim() || "";
 
-  if (item.action === "terminal.exec") {
+  if (action === "terminal.exec") {
     return command || "-";
   }
-  if (item.action === "auth.verify") {
+  if (action === "auth.verify") {
     return "连接验证";
   }
-  if (item.action === "auth.activate") {
+  if (action === "auth.activate") {
     return "设备激活";
   }
-  if (item.action === "upload" || item.action === "upload.complete") {
+  if (action === "upload" || action === "upload.complete") {
     return fileName || targetDir || "上传文件";
   }
-  if (item.action === "rename" || item.action === "copy") {
+  if (action === "rename" || action === "copy") {
     if (pathParam && fileName) return `${pathParam} → ${fileName}`;
     return fileName || pathParam || "-";
   }
-  if (item.action === "move") {
+  if (action === "move") {
     const destination = `${targetRoot ? `${targetRoot}:` : ""}${targetDir ? `${targetDir}/` : ""}${fileName}`;
     if (pathParam && destination) return `${pathParam} → ${destination}`;
     return destination || pathParam || "-";
   }
-  if (item.action === "extract") {
+  if (action === "extract") {
     if (pathParam && targetDir) return `${pathParam} → ${targetDir}`;
     return targetDir || pathParam || "-";
   }
@@ -271,16 +297,20 @@ const CONTEXT_MENU_ITEM_HEIGHT = 33;
 /** 菜单上下 padding。 */
 const CONTEXT_MENU_PADDING = 16;
 
-/** 按条目类型计算右键菜单条目数（含拷贝/移动到…，task-40）。 */
+/** 按条目类型计算右键菜单条目数（含新建/拷贝/移动到…）。 */
 function contextMenuItemCount(entry: DirEntry): number {
-  if (entry.type !== "file") return 5;
+  if (entry.type !== "file") return 7;
   const isZip = fileExtension(entry.name) === "zip";
-  return isZip ? 8 : 7;
+  return isZip ? 10 : 9;
 }
 
+/** 空白处右键菜单条目数：新建文件 / 新建文件夹 / 终端。 */
+const BLANK_CONTEXT_MENU_ITEM_COUNT = 3;
+
 /** 右键菜单实际高度（用于边缘避让，避免菜单溢出视口）。 */
-function contextMenuHeight(entry: DirEntry): number {
-  return CONTEXT_MENU_PADDING + contextMenuItemCount(entry) * CONTEXT_MENU_ITEM_HEIGHT;
+function contextMenuHeight(entry: DirEntry | null): number {
+  const count = entry ? contextMenuItemCount(entry) : BLANK_CONTEXT_MENU_ITEM_COUNT;
+  return CONTEXT_MENU_PADDING + count * CONTEXT_MENU_ITEM_HEIGHT;
 }
 
 /** Monaco 缩进宽度偏好（2/4 空格，默认 4，task-37）。 */
@@ -296,6 +326,12 @@ function loadEditorTabSize(): number {
   return 4;
 }
 
+/** 取相对路径的父目录（根目录返回空串）。 */
+function parentDirectoryPath(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index <= 0 ? "" : path.slice(0, index);
+}
+
 /** 校验重命名的单段名称；返回错误提示（合法时返回 null）。 */
 function validateSingleName(raw: string): string | null {
   const name = raw.trim();
@@ -309,7 +345,7 @@ function validateSingleName(raw: string): string | null {
 export interface ServerBrowserProps {
   configured: boolean;
   serverName?: string;
-  /** 从根到当前目标的名称链（转发目标时形如 ["A","B"]）。 */
+  /** 从根到当前目标的名称链（代理服务器时形如 ["A","B"]）。 */
   chainPath?: string[];
   /** 本地全部服务器（审计来源链按 appKey/url 映射为可点击节点）。 */
   servers?: ServerView[];
@@ -398,7 +434,7 @@ export default function ServerBrowser({
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
-    entry: DirEntry;
+    entry: DirEntry | null;
   } | null>(null);
   /** Finder 式选中行（task-26）。 */
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -418,6 +454,8 @@ export default function ServerBrowser({
   const [extractingPath, setExtractingPath] = useState<string | null>(null);
   /** 拷贝中的路径（task-40：菜单项 loading/禁用）。 */
   const [copyingPath, setCopyingPath] = useState<string | null>(null);
+  /** 「新建文件/文件夹」弹窗。 */
+  const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(null);
   /** 「移动到…」弹窗（task-40）。 */
   const [moveDialog, setMoveDialog] = useState<MoveDialogState | null>(null);
   const moveLoadSeqRef = useRef(0);
@@ -1127,6 +1165,14 @@ export default function ServerBrowser({
     setTerminalOpen(true);
   }, [currentPath, rootPath, terminalOpen]);
 
+  /** 空白处右键「终端」：以当前目录打开（已打开时重新定位）。 */
+  const openTerminalAtCurrent = useCallback(() => {
+    setContextMenu(null);
+    setTerminalInitialCwd(joinRootPath(rootPath, currentPath));
+    setTerminalOpenToken((token) => token + 1);
+    setTerminalOpen(true);
+  }, [currentPath, rootPath]);
+
   /**
    * 右键「在此打开终端」：文件定位到所在目录（当前目录），目录定位到目录本身。
    */
@@ -1361,6 +1407,38 @@ export default function ServerBrowser({
     [clearPendingRenameTimer, selectFinderPath],
   );
 
+  /** 目录空白处右键：阻止浏览器默认菜单，改为新建文件/文件夹/终端。 */
+  const openBlankContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLElement>) => {
+      // 终端/快速查找等浮层保留浏览器默认菜单（复制、粘贴等）。
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest(
+          ".browser-toolbar, .terminal-panel, .quick-open, .quick-open-mask, .ant-modal-root, .ant-drawer",
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const margin = 8;
+      const x = Math.max(
+        margin,
+        Math.min(event.clientX, window.innerWidth - CONTEXT_MENU_WIDTH - margin),
+      );
+      const y = Math.max(
+        margin,
+        Math.min(
+          event.clientY,
+          window.innerHeight - contextMenuHeight(null) - margin,
+        ),
+      );
+      setContextMenu({ x, y, entry: null });
+    },
+    [],
+  );
+
   // 点击空白 / Esc / 滚动 / 窗口 resize 关闭右键菜单（菜单内部点击不关闭）。
   useEffect(() => {
     if (!contextMenu) return;
@@ -1401,6 +1479,66 @@ export default function ServerBrowser({
     },
     [clearPendingRenameTimer],
   );
+
+  /** 打开指定目录下的「新建文件/文件夹」弹窗。 */
+  const openCreateDialogIn = useCallback(
+    (targetDir: string, type: "file" | "directory") => {
+      setContextMenu(null);
+      setCreateDialog({
+        targetDir,
+        type,
+        name: "",
+        submitting: false,
+      });
+    },
+    [],
+  );
+
+  /** 打开「新建文件/文件夹」：文件夹内建在自身，文件旁建在所在目录。 */
+  const openCreateDialog = useCallback(
+    (record: DirEntry, type: "file" | "directory") => {
+      openCreateDialogIn(
+        record.type === "directory"
+          ? record.path
+          : parentDirectoryPath(record.path),
+        type,
+      );
+    },
+    [openCreateDialogIn],
+  );
+
+  /** 提交新建：名称客户端先校验，失败留在弹窗内便于修改。 */
+  const submitCreate = useCallback(async () => {
+    if (!createDialog || createDialog.submitting) return;
+    const invalid = validateSingleName(createDialog.name);
+    if (invalid) {
+      message.warning(invalid);
+      return;
+    }
+    const name = createDialog.name.trim();
+    setCreateDialog((current) =>
+      current ? { ...current, submitting: true } : current,
+    );
+    try {
+      const result = await createServerEntry(
+        createDialog.targetDir,
+        name,
+        createDialog.type,
+        rootId,
+      );
+      message.success(
+        `已创建${result.type === "directory" ? "文件夹" : "文件"}「${result.name}」`,
+      );
+      setCreateDialog(null);
+      setHighlightPath(result.path);
+      await load(createDialog.targetDir);
+    } catch (error) {
+      message.error(errorMessage(error));
+      setCreateDialog((current) =>
+        current ? { ...current, submitting: false } : current,
+      );
+    }
+  }, [createDialog, load, message, rootId]);
 
   /** Esc 取消：标记取消，避免随后触发的 blur 又保存一次。 */
   const cancelInlineRename = useCallback(() => {
@@ -1850,23 +1988,12 @@ export default function ServerBrowser({
       : 0;
   const dragRoot = rootName ? `「${rootName}」` : "根目录";
   const dragTarget = currentPath ? `${dragRoot}/${currentPath}` : dragRoot;
+  /** 右键菜单当前条目；null 表示目录空白处。 */
+  const contextEntry = contextMenu?.entry ?? null;
 
   return (
-    <div className="browser-shell">
+    <div className="browser-shell" onContextMenu={openBlankContextMenu}>
       <Card className="page-card browser-card">
-        {serverName && (
-          <div
-            className="browser-server-title"
-            data-testid="browser-server-title"
-          >
-            <Text strong>{serverName}</Text>
-            {relayChainLabel && (
-              <Text type="secondary" className="browser-server-relay">
-                （经 {relayChainLabel} 转发）
-              </Text>
-            )}
-          </div>
-        )}
         <div className="browser-toolbar" data-testid="browser-toolbar">
           <div className="browser-path" data-testid="browser-path">
             <FolderOutlined className="browser-path-icon" />
@@ -2000,144 +2127,254 @@ export default function ServerBrowser({
           style={{ left: contextMenu.x, top: contextMenu.y }}
           data-testid="row-context-menu"
           role="menu"
-          aria-label={`${contextMenu.entry.name} 操作`}
+          aria-label={
+            contextEntry ? `${contextEntry.name} 操作` : "当前目录操作"
+          }
         >
-          {contextMenu.entry.type === "file" && (
-            <button
-              type="button"
-              role="menuitem"
-              className="row-context-menu-item"
-              data-testid="context-edit"
-              onClick={() => void openEditor(contextMenu.entry)}
-            >
-              <EditOutlined />
-              <span>在线编辑</span>
-            </button>
-          )}
-          {contextMenu.entry.type === "file" &&
-            fileExtension(contextMenu.entry.name) === "zip" && (
-              <button
-                type="button"
-                role="menuitem"
-                className="row-context-menu-item"
-                data-testid="context-extract"
-                disabled={extractingPath !== null}
-                onClick={() => void handleExtractZip(contextMenu.entry)}
-              >
-                <FileZipOutlined />
-                <span>{extractingPath ? "解压中…" : "解压"}</span>
-              </button>
-            )}
-          {contextMenu.entry.type === "file" && (
-            <button
-              type="button"
-              role="menuitem"
-              className="row-context-menu-item"
-              data-testid="context-open-terminal"
-              onClick={() => openTerminalForEntry(contextMenu.entry)}
-            >
-              <CodeOutlined />
-              <span>在此打开终端</span>
-            </button>
-          )}
-          {contextMenu.entry.type === "file" && (
+          {contextEntry ? (
             <>
               <button
                 type="button"
                 role="menuitem"
                 className="row-context-menu-item"
-                data-testid="context-copy"
-                disabled={copyingPath !== null}
-                onClick={() => void copyContextEntry(contextMenu.entry)}
+                data-testid="context-create-file"
+                onClick={() => openCreateDialog(contextEntry, "file")}
               >
-                <CopyOutlined />
-                <span>{copyingPath ? "拷贝中…" : "拷贝"}</span>
+                <FileAddOutlined />
+                <span>新建文件</span>
               </button>
               <button
                 type="button"
                 role="menuitem"
                 className="row-context-menu-item"
-                data-testid="context-move"
-                onClick={() => openMoveDialog(contextMenu.entry)}
+                data-testid="context-create-directory"
+                onClick={() => openCreateDialog(contextEntry, "directory")}
               >
-                <FolderOpenOutlined />
-                <span>移动到…</span>
+                <FolderAddOutlined />
+                <span>新建文件夹</span>
+              </button>
+              {contextEntry.type === "file" && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="row-context-menu-item"
+                  data-testid="context-edit"
+                  onClick={() => void openEditor(contextEntry)}
+                >
+                  <EditOutlined />
+                  <span>在线编辑</span>
+                </button>
+              )}
+              {contextEntry.type === "file" &&
+                fileExtension(contextEntry.name) === "zip" && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="row-context-menu-item"
+                    data-testid="context-extract"
+                    disabled={extractingPath !== null}
+                    onClick={() => void handleExtractZip(contextEntry)}
+                  >
+                    <FileZipOutlined />
+                    <span>{extractingPath ? "解压中…" : "解压"}</span>
+                  </button>
+                )}
+              {contextEntry.type === "file" && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="row-context-menu-item"
+                  data-testid="context-open-terminal"
+                  onClick={() => openTerminalForEntry(contextEntry)}
+                >
+                  <CodeOutlined />
+                  <span>在此打开终端</span>
+                </button>
+              )}
+              {contextEntry.type === "file" && (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="row-context-menu-item"
+                    data-testid="context-copy"
+                    disabled={copyingPath !== null}
+                    onClick={() => void copyContextEntry(contextEntry)}
+                  >
+                    <CopyOutlined />
+                    <span>{copyingPath ? "拷贝中…" : "拷贝"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="row-context-menu-item"
+                    data-testid="context-move"
+                    onClick={() => openMoveDialog(contextEntry)}
+                  >
+                    <FolderOpenOutlined />
+                    <span>移动到…</span>
+                  </button>
+                </>
+              )}
+              {contextEntry.type === "file" && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="row-context-menu-item"
+                  data-testid="context-download"
+                  disabled={downloadingPath !== null}
+                  onClick={() => void handleDownloadFile(contextEntry)}
+                >
+                  <DownloadOutlined />
+                  <span>{downloadingPath ? "下载中…" : "下载"}</span>
+                </button>
+              )}
+              {contextEntry.type === "directory" && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="row-context-menu-item"
+                  data-testid="context-open-terminal"
+                  onClick={() => openTerminalForEntry(contextEntry)}
+                >
+                  <CodeOutlined />
+                  <span>在此打开终端</span>
+                </button>
+              )}
+              {contextEntry.type === "directory" && (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="row-context-menu-item"
+                    data-testid="context-copy"
+                    disabled={copyingPath !== null}
+                    onClick={() => void copyContextEntry(contextEntry)}
+                  >
+                    <CopyOutlined />
+                    <span>{copyingPath ? "拷贝中…" : "拷贝"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="row-context-menu-item"
+                    data-testid="context-move"
+                    onClick={() => openMoveDialog(contextEntry)}
+                  >
+                    <FolderOpenOutlined />
+                    <span>移动到…</span>
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                role="menuitem"
+                className="row-context-menu-item"
+                data-testid="context-rename"
+                onClick={() => startInlineRename(contextEntry)}
+              >
+                <EditOutlined />
+                <span>重命名</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="row-context-menu-item row-context-menu-item-danger"
+                data-testid="context-delete"
+                disabled={deletingPath !== null}
+                onClick={() => void requestDelete(contextEntry)}
+              >
+                <DeleteOutlined />
+                <span>{deletingPath ? "删除中…" : "删除"}</span>
               </button>
             </>
-          )}
-          {contextMenu.entry.type === "file" && (
-            <button
-              type="button"
-              role="menuitem"
-              className="row-context-menu-item"
-              data-testid="context-download"
-              disabled={downloadingPath !== null}
-              onClick={() => void handleDownloadFile(contextMenu.entry)}
-            >
-              <DownloadOutlined />
-              <span>{downloadingPath ? "下载中…" : "下载"}</span>
-            </button>
-          )}
-          {contextMenu.entry.type === "directory" && (
-            <button
-              type="button"
-              role="menuitem"
-              className="row-context-menu-item"
-              data-testid="context-open-terminal"
-              onClick={() => openTerminalForEntry(contextMenu.entry)}
-            >
-              <CodeOutlined />
-              <span>在此打开终端</span>
-            </button>
-          )}
-          {contextMenu.entry.type === "directory" && (
+          ) : (
             <>
               <button
                 type="button"
                 role="menuitem"
                 className="row-context-menu-item"
-                data-testid="context-copy"
-                disabled={copyingPath !== null}
-                onClick={() => void copyContextEntry(contextMenu.entry)}
+                data-testid="blank-context-create-file"
+                onClick={() => openCreateDialogIn(currentPath, "file")}
               >
-                <CopyOutlined />
-                <span>{copyingPath ? "拷贝中…" : "拷贝"}</span>
+                <FileAddOutlined />
+                <span>新建文件</span>
               </button>
               <button
                 type="button"
                 role="menuitem"
                 className="row-context-menu-item"
-                data-testid="context-move"
-                onClick={() => openMoveDialog(contextMenu.entry)}
+                data-testid="blank-context-create-directory"
+                onClick={() => openCreateDialogIn(currentPath, "directory")}
               >
-                <FolderOpenOutlined />
-                <span>移动到…</span>
+                <FolderAddOutlined />
+                <span>新建文件夹</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="row-context-menu-item"
+                data-testid="blank-context-terminal"
+                onClick={openTerminalAtCurrent}
+              >
+                <CodeOutlined />
+                <span>在此打开终端</span>
               </button>
             </>
           )}
-          <button
-            type="button"
-            role="menuitem"
-            className="row-context-menu-item"
-            data-testid="context-rename"
-            onClick={() => startInlineRename(contextMenu.entry)}
-          >
-            <EditOutlined />
-            <span>重命名</span>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="row-context-menu-item row-context-menu-item-danger"
-            data-testid="context-delete"
-            disabled={deletingPath !== null}
-            onClick={() => void requestDelete(contextMenu.entry)}
-          >
-            <DeleteOutlined />
-            <span>{deletingPath ? "删除中…" : "删除"}</span>
-          </button>
         </div>
       )}
+
+      <Modal
+        open={createDialog !== null}
+        title={createDialog?.type === "directory" ? "新建文件夹" : "新建文件"}
+        width={480}
+        centered
+        destroyOnHidden
+        maskClosable={!createDialog?.submitting}
+        keyboard={!createDialog?.submitting}
+        okText="创建"
+        cancelText="取消"
+        confirmLoading={createDialog?.submitting}
+        onOk={() => void submitCreate()}
+        onCancel={() => {
+          if (!createDialog?.submitting) setCreateDialog(null);
+        }}
+      >
+        {createDialog && (
+          <div className="create-dialog" data-testid="create-dialog">
+            <div className="create-dialog-location">
+              <Text type="secondary">位置：</Text>
+              <Text ellipsis style={{ maxWidth: 340 }}>
+                {`${rootName ?? "当前存储根"}${
+                  createDialog.targetDir ? `/${createDialog.targetDir}` : ""
+                }`}
+              </Text>
+            </div>
+            <Input
+              autoFocus
+              data-testid="create-name-input"
+              maxLength={255}
+              value={createDialog.name}
+              placeholder={
+                createDialog.type === "directory" ? "请输入文件夹名" : "请输入文件名"
+              }
+              disabled={createDialog.submitting}
+              onChange={(event) =>
+                setCreateDialog((current) =>
+                  current ? { ...current, name: event.target.value } : current,
+                )
+              }
+              onPressEnter={() => void submitCreate()}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {createDialog.type === "directory"
+                ? "文件夹名不能包含路径分隔符，创建后可在右键菜单中重命名。"
+                : "新文件为空文件，创建后可在右键菜单中在线编辑。"}
+            </Text>
+          </div>
+        )}
+      </Modal>
 
       <Modal
         open={moveDialog !== null}

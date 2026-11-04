@@ -331,12 +331,12 @@ UPLOAD_APP_SECRET=请替换为随机长密钥
 
 ### 2.6 多级转发（relay）部署
 
-relay 默认关闭。只要某台服务端要作为**中转节点**（A 或中间 B/C），就必须升级到本版本并在其环境文件/启动参数里显式开启：
+relay 配置默认关闭，避免所有节点默认成为代理。本地 `scripts/run-server.sh` 和分包 `start.sh` 会默认注入 `--app.relay.enabled=true`；直接 `java -jar`、systemd、Docker 等部署方式需要显式开启：
 
 ```yaml
 app:
   relay:
-    enabled: true
+    enabled: true                  # 中转节点显式开启；纯数据节点保持 false
     max-hops: 16
     max-chain-header-bytes: 16384
     max-via-header-bytes: 8192
@@ -351,7 +351,7 @@ app:
 部署拓扑建议：
 
 - 客户端只直连 A；B/C 只允许 A（或上一跳）访问，不要在客户端配置里直连 B/C，也不要把 B/C 暴露给公网。
-- A/B 作为中转节点必须 `app.relay.enabled=true`；最终目标 C 的数据接口可以仍是旧版（A/B 会按正常 path 转发），但 C 要记录来源链/`relayVia` 需要升级本版本。
+- A/B 作为中转节点需要开启（本地 `run-server.sh`/分包 `start.sh` 已自动注入；直接 jar/systemd/Docker 需显式配置）；最终目标 C 的数据接口可以仍是旧版（A/B 会按正常 path 转发），但 C 要记录来源链/`relayVia` 需要升级本版本。
 - 旧客户端读到 v3 config 可能把 relay 当 direct 直连 B/C，从而绕过 A；发布窗口内限制 B/C 可达性、轮换 B/C 凭据，或强制升级客户端。
 - `allowed-hosts` 非空时只允许列出的 host（或 `host:port`）；默认拒绝 loopback/link-local/云元数据地址，`allow-private-network` 默认 true（内网转发需要）。
 - 反向代理子路径：`serverUrl` 可带子路径（如 `https://example.com/scopeftp`），relay 转发会保留该子路径后再追加 `/api/relay` / 原 path。

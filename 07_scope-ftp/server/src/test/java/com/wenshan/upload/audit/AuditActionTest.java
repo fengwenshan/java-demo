@@ -22,6 +22,7 @@ class AuditActionTest {
     void keepsNormalPathAction() {
         assertThat(AuditAction.resolve("GET", "/api/files")).isEqualTo("files.list");
         assertThat(AuditAction.resolve("POST", "/api/files/upload/init")).isEqualTo("upload.init");
+        assertThat(AuditAction.resolve("POST", "/api/files/create")).isEqualTo("create");
     }
 
     @Test

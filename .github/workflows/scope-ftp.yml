@@ -146,7 +146,7 @@ jobs:
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: ScopeFTP-client-macos-${{ matrix.arch }}
+          name: ScopeFTP-macos-${{ matrix.arch }}
           path: 07_scope-ftp/client/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
@@ -203,14 +203,14 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}/client
         run: |
           $release = "src-tauri/target"
-          $portable = Get-ChildItem $release -Recurse -Filter "ScopeFTP-client.exe" |
+          $portable = Get-ChildItem $release -Recurse -Filter "ScopeFTP.exe" |
             Where-Object { $_.FullName -match "[\\/]release[\\/]" } |
             Select-Object -First 1
           $installer = Get-ChildItem $release -Recurse -Filter "*.exe" |
             Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" } |
             Select-Object -First 1
           if (-not $portable) {
-            throw "未找到 Windows 可执行文件 ScopeFTP-client.exe"
+            throw "未找到 Windows 可执行文件 ScopeFTP.exe"
           }
           if (-not $installer) {
             throw "未找到 NSIS 安装包 .exe"

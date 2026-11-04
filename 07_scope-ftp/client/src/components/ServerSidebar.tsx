@@ -1,12 +1,10 @@
 import type { ReactNode } from "react";
 import {
-  EditOutlined,
+  DesktopOutlined,
   FolderOutlined,
-  NodeIndexOutlined,
   PlusOutlined,
-  SafetyCertificateOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Tag, Tooltip, Typography } from "antd";
+import { Alert, Button, Tooltip, Typography } from "antd";
 
 import type {
   ConfigView,
@@ -21,6 +19,8 @@ export interface ServerSidebarProps {
   config: ConfigView | null;
   activeServer: ServerView | null;
   connection: ConnectionState;
+  /** 同组服务器的连通性（active 自身使用 connection）。 */
+  serverHealth: Record<string, ConnectionState>;
   configured: boolean;
   /** 当前服务器的存储根（task-16；旧单根服务端为空）。 */
   roots: StorageRoot[];
@@ -28,25 +28,24 @@ export interface ServerSidebarProps {
   onSelectRoot: (id: string) => void;
   onSelectServer: (id: string) => void;
   onAddServer: () => void;
-  /** 在 active 且已连接的父服务器下新建转发目标。 */
-  onAddRelay: (parentId: string) => void;
-  onEditServer: (id: string) => void;
+  /** 打开该服务器的「设备与服务端」详情页（只读，不切换当前服务器）。 */
+  onOpenDetail: (id: string) => void;
   onOpenSettings: () => void;
 }
 
-/** 左侧固定栏：品牌 + 多服务器列表 + 当前服务器信息 + 验证/设置入口。 */
+/** 左侧固定栏：多服务器列表（切换/查看详情）+ 存储目录。 */
 export default function ServerSidebar({
   config,
   activeServer,
   connection,
+  serverHealth,
   configured,
   roots,
   activeRootId,
   onSelectRoot,
   onSelectServer,
   onAddServer,
-  onAddRelay,
-  onEditServer,
+  onOpenDetail,
   onOpenSettings,
 }: ServerSidebarProps) {
   const activeRoot =
@@ -59,6 +58,25 @@ export default function ServerSidebar({
 
   const renderServer = (server: ServerView, depth: number): ReactNode => {
     const active = server.id === activeServer?.id;
+    const health = serverHealth[server.id];
+    // active 同时参考 connection 与同组 ping 结果：任何一方连通即显示绿色；
+    // ping 进行中优先显示黄色，避免主连接成功把重新检测的状态盖掉。
+    const status = active
+      ? health?.status === "checking"
+        ? health
+        : health?.status === "connected"
+          ? health
+          : connection.status === "connected"
+            ? connection
+            : (health ?? connection)
+      : health;
+    const connected = status?.status === "connected";
+    const checking = status?.status === "checking";
+    const statusTitle = connected
+      ? "已连接"
+      : checking
+        ? "检测中"
+        : status?.message || "未连接";
     const children = childrenOf(server.id);
     return (
       <div key={server.id} className="server-tree-node">
@@ -84,18 +102,12 @@ export default function ServerSidebar({
           }}
         >
           <span
-            className={`server-status-dot${active ? " is-active" : ""}${
-              active && connection.status === "failed" ? " is-error" : ""
+            className={`server-status-dot${connected ? " is-active" : ""}${
+              checking ? " is-checking" : ""
             }`}
-            title={
-              active
-                ? connection.status === "connected"
-                  ? "已连接"
-                  : connection.status === "checking"
-                    ? "检测中"
-                    : connection.message || "未连接"
-                : undefined
-            }
+            title={statusTitle}
+            data-testid="server-status-dot"
+            data-status={status?.status ?? "unknown"}
           />
           <div className="server-list-main">
             <Text strong={active} ellipsis className="server-list-name">
@@ -105,45 +117,20 @@ export default function ServerSidebar({
               {server.serverUrl}
             </Text>
           </div>
-          {server.kind === "relay" && (
-            <Tag
-              icon={<NodeIndexOutlined />}
-              className="server-relay-tag"
-              data-testid="relay-badge"
-            >
-              转发
-            </Tag>
-          )}
-          <Tooltip title={`编辑「${server.name}」`}>
+          <Tooltip title={`查看「${server.name}」设备与服务端详情`}>
             <Button
               type="text"
               size="small"
-              className="server-list-edit"
-              icon={<EditOutlined />}
-              aria-label={`编辑 ${server.name}`}
-              data-testid={server.kind === "relay" ? "edit-relay" : "edit-server"}
+              className="server-list-detail"
+              icon={<DesktopOutlined />}
+              aria-label={`查看 ${server.name} 详情`}
+              data-testid="server-detail"
               onClick={(event) => {
                 event.stopPropagation();
-                onEditServer(server.id);
+                onOpenDetail(server.id);
               }}
             />
           </Tooltip>
-          {active && connection.status === "connected" && (
-            <Tooltip title="添加转发目标">
-              <Button
-                type="text"
-                size="small"
-                className="server-list-add-relay"
-                icon={<PlusOutlined />}
-                aria-label="添加转发目标"
-                data-testid="add-relay"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onAddRelay(server.id);
-                }}
-              />
-            </Tooltip>
-          )}
         </div>
         {children.map((child) => renderServer(child, depth + 1))}
       </div>
@@ -152,18 +139,6 @@ export default function ServerSidebar({
 
   return (
     <div className="server-sidebar">
-      <div className="app-brand">
-        <span className="app-brand-icon">
-          <SafetyCertificateOutlined />
-        </span>
-        <div className="app-brand-text">
-          <Text strong style={{ fontSize: 16, lineHeight: "20px" }}>
-            ScopeFTP
-          </Text>
-          <div className="app-brand-sub">ScopeFTP-client</div>
-        </div>
-      </div>
-
       {/* ---------- 多服务器列表 ---------- */}
       <section className="server-section" data-testid="server-section">
         <div className="server-section-header">

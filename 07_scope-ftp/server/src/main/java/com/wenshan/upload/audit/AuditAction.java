@@ -71,6 +71,7 @@ public final class AuditAction {
             case "/api/files/upload" -> "POST".equals(verb) ? "upload" : null;
             case "/api/files/upload/init" -> "POST".equals(verb) ? "upload.init" : null;
             case "/api/files/rename" -> "POST".equals(verb) ? "rename" : null;
+            case "/api/files/create" -> "POST".equals(verb) ? "create" : null;
             case "/api/files/extract" -> "POST".equals(verb) ? "extract" : null;
             case "/api/files/copy" -> "POST".equals(verb) ? "copy" : null;
             case "/api/files/move" -> "POST".equals(verb) ? "move" : null;

@@ -1,0 +1,5 @@
+rasterize
+.tmp/
+.modulecache/
+__pycache__/
+dist/

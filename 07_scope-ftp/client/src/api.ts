@@ -1,6 +1,6 @@
 /**
- * 前端访问 Rust 侧的唯一入口：全部通过 Tauri `invoke`，不直接发 HTTP，
- * 也拿不到 appSecret。
+ * 前端访问 Rust 侧的唯一入口：全部通过 Tauri `invoke`，不直接发 HTTP。
+ * 常规配置视图不含 appSecret；仅用户点击密码框眼睛时通过 reveal 命令读取本地自定义值。
  *
  * 注意：Tauri 命令的可选参数（Rust 侧 `Option<T>`）**必须显式传 `null`**，
  * 不能传 `undefined`（`JSON.stringify` 会把 undefined 字段丢掉，Tauri 反序列化
@@ -12,10 +12,12 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
   ActivateResult,
+  LocalNetworkInfo,
   AuditLogPage,
   AuditLogQuery,
   ConfigView,
   CopyResult,
+  CreateResult,
   DirList,
   ExtractResult,
   FileContent,
@@ -82,6 +84,17 @@ export interface SaveServerArgs {
   appSecret?: string | null;
 }
 
+/**
+ * 在用户点击密码框眼睛时读取一台已保存服务器的 AppSecret。
+ *
+ * 配置文件里是 0600 本地明文，这里只读取，不做解密；常规 `get_config`
+ * 视图仍不包含 secret。
+ */
+export async function revealServerSecret(id?: string | null): Promise<string> {
+  requireDesktop();
+  return invoke<string>("reveal_server_secret", { id: id ?? null });
+}
+
 /** 新建或编辑一台服务器（新建后自动切换为当前服务器）。 */
 export async function saveServer(args: SaveServerArgs): Promise<ConfigView> {
   requireDesktop();
@@ -95,7 +108,7 @@ export async function saveServer(args: SaveServerArgs): Promise<ConfigView> {
   });
 }
 
-/** 删除一台服务器（含其下所有转发目标的本地配置与续传状态）。 */
+/** 删除一台服务器（含其下所有代理服务器的本地配置与续传状态）。 */
 export async function deleteServer(id: string): Promise<ConfigView> {
   requireDesktop();
   return invoke<ConfigView>("delete_server", { id });
@@ -104,20 +117,20 @@ export async function deleteServer(id: string): Promise<ConfigView> {
 export interface SaveRelayArgs {
   /** 不传/null 表示新建；传 id 表示编辑。 */
   id: string | null;
-  /** 上级服务器 id（转发目标挂在它下面）。 */
+  /** 上级服务器 id（代理服务器挂在它下面）。 */
   parentId: string;
   name: string;
   /** 目标中转服务器地址（父服务器可访问）。 */
   serverUrl: string;
   deviceName: string;
-  /** 转发目标自己的 AppKey（必填）。 */
+  /** 代理服务器自己的 AppKey（必填）。 */
   appKey: string;
-  /** 转发目标自己的 AppSecret；编辑时 null 表示保留原值，新建时必填。 */
+  /** 代理服务器自己的 AppSecret；编辑时 null 表示保留原值，新建时必填。 */
   appSecret: string | null;
 }
 
 /**
- * 新建或编辑一个转发目标（转发链 v3）。
+ * 新建或编辑一个代理服务器（转发链 v3）。
  *
  * 新建不会自动切换 active；编辑保存后需要重新验证连接。
  */
@@ -137,7 +150,7 @@ export async function saveRelay(args: SaveRelayArgs): Promise<ConfigView> {
 export interface VerifyRelayPreviewArgs {
   /** 上级服务器 id（父链必须已在本地配置中）。 */
   parentId: string;
-  /** 编辑已保存的转发目标时传其 id，用于复用原 secret。 */
+  /** 编辑已保存的代理服务器时传其 id，用于复用原 secret。 */
   existingId: string | null;
   name: string;
   serverUrl: string;
@@ -147,7 +160,7 @@ export interface VerifyRelayPreviewArgs {
 }
 
 /**
- * 保存转发目标前，用「父链 + 待保存的目标」整条链做预览验证；
+ * 保存代理服务器前，用「父链 + 待保存的目标」整条链做预览验证；
  * 不落盘、不切换配置，验证成功后再调用 `saveRelay`。
  */
 export async function verifyRelayPreview(
@@ -186,18 +199,29 @@ export async function verifyConnection(): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_connection");
 }
 
+/** 单独验证一台已保存服务器（不切换 active，用于左侧同组连通性检测）。 */
+export async function verifyServer(id: string): Promise<void> {
+  requireDesktop();
+  return invoke<void>("verify_server", { id });
+}
+
 export interface VerifyConnectionPreviewArgs {
   serverUrl: string;
   /** 自定义 AppKey；空串/不传表示使用内置默认。 */
   appKey?: string;
-  /** 自定义 AppSecret；空串/不传表示使用内置默认。 */
-  appSecret?: string;
+  /**
+   * 自定义 AppSecret：`null`/不传表示沿用已保存服务器的原值（编辑场景），
+   * 空串表示使用内置默认（新建或清除自定义密钥）。
+   */
+  appSecret?: string | null;
+  /** 编辑已保存服务器时传其 id：沿用原 deviceId/deviceName 与未修改的 secret。 */
+  existingId?: string | null;
 }
 
 /**
- * 添加服务器前的预览验证（契约 3.2）：用表单里的地址与凭据直接验证，
+ * 添加 / 编辑服务器前的预览验证（契约 3.2）：用表单里的地址与凭据直接验证，
  * 不保存、不切换配置，因此不需要先把服务器加进列表。
- * 验证成功后再调用 `saveServer` 真正添加服务器。
+ * 验证成功后才由调用方调用 `saveServer` / `saveRelay` 落盘。
  */
 export async function verifyConnectionPreview(
   args: VerifyConnectionPreviewArgs,
@@ -206,8 +230,18 @@ export async function verifyConnectionPreview(
   return invoke<VerifyResult>("verify_connection_preview", {
     serverUrl: args.serverUrl,
     appKey: args.appKey ?? "",
-    appSecret: args.appSecret ?? "",
+    appSecret: args.appSecret ?? null,
+    existingId: args.existingId ?? null,
   });
+}
+
+/**
+ * 本机网络信息：物理地址（MAC）与默认路由网卡的局域网 IPv4。
+ * 只用于详情页展示，不写配置、不参与签名。
+ */
+export async function getLocalNetworkInfo(): Promise<LocalNetworkInfo> {
+  requireDesktop();
+  return invoke<LocalNetworkInfo>("get_local_network_info");
 }
 
 /** 激活设备（契约 3.3；针对当前激活服务器的 deviceId/deviceName）。 */
@@ -398,6 +432,22 @@ export async function openServerFile(
   requireDesktop();
   return invoke<string>("open_server_file", {
     path,
+    root: root ?? null,
+  });
+}
+
+/** 在指定目录新建空文件或文件夹（`parent` 为空表示存储根目录）。 */
+export async function createServerEntry(
+  parent: string,
+  name: string,
+  kind: "file" | "directory",
+  root?: string | null,
+): Promise<CreateResult> {
+  requireDesktop();
+  return invoke<CreateResult>("create_server_entry", {
+    parent,
+    name,
+    kind,
     root: root ?? null,
   });
 }

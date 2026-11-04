@@ -163,6 +163,8 @@ for profile in "${PROFILES[@]}"; do
 #   [--spring.profiles.active=xxx] 临时覆盖 Spring profile
 #   [--其它Spring参数=xxx ...]      原样透传给服务端
 #   直接传参数（不带 start/run）等同于 run，前台运行。
+#   多级转发默认开启：start.sh 自动追加 --app.relay.enabled=true；关闭请显式传
+#   --app.relay.enabled=false。
 set -euo pipefail
 cd "\$(dirname "\$0")"
 DIR="\$(pwd)"
@@ -199,6 +201,8 @@ usage() {
   [--spring.profiles.active=xxx] 临时覆盖 Spring profile
   [--其它Spring参数=xxx ...]      原样透传给服务端
   直接传参数（不带 start/run）等同于 run，前台运行。
+  多级转发默认开启；start.sh 自动追加 --app.relay.enabled=true，关闭请显式传
+  --app.relay.enabled=false。
 
 示例：
   ./start.sh --app-key=my-key --app-secret=my-secret
@@ -300,8 +304,22 @@ check_client_credentials() {
   return 1
 }
 
+has_relay_arg() {
+  local arg
+  for arg in "\$@"; do
+    case "\$arg" in
+      --app.relay.enabled|--app.relay.enabled=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 start_bg() {
   check_client_credentials "\$@" || exit 1
+  local -a start_args=("\$@")
+  if ! has_relay_arg "\$@"; then
+    start_args+=(--app.relay.enabled=true)
+  fi
   if is_running; then
     echo "服务已在运行（PID \$(cat "\$PID_FILE")），未重复启动" >&2
     echo "查看状态：./start.sh status    查看日志：./start.sh logs" >&2
@@ -310,7 +328,7 @@ start_bg() {
   resolve_java_bin
   mkdir -p "\$LOG_DIR"
   printf '%s\n' "===== \$(date '+%Y-%m-%d %H:%M:%S') 启动 profile=${profile} =====" >> "\$LOG_FILE"
-  nohup "\$JAVA_BIN" \$JAVA_OPTS -jar "\$JAR_FILE" \$SPRING_PROFILE_OPT "\$@" >> "\$LOG_FILE" 2>&1 < /dev/null &
+  nohup "\$JAVA_BIN" \$JAVA_OPTS -jar "\$JAR_FILE" \$SPRING_PROFILE_OPT "\${start_args[@]}" >> "\$LOG_FILE" 2>&1 < /dev/null &
   local pid=\$!
   echo "\$pid" > "\$PID_FILE"
   sleep 1
@@ -332,8 +350,12 @@ run_fg() {
     echo "服务已在后台运行（PID \$(cat "\$PID_FILE")），请先 ./start.sh stop" >&2
     exit 1
   fi
+  local -a start_args=("\$@")
+  if ! has_relay_arg "\$@"; then
+    start_args+=(--app.relay.enabled=true)
+  fi
   resolve_java_bin
-  exec "\$JAVA_BIN" \$JAVA_OPTS -jar "\$JAR_FILE" \$SPRING_PROFILE_OPT "\$@"
+  exec "\$JAVA_BIN" \$JAVA_OPTS -jar "\$JAR_FILE" \$SPRING_PROFILE_OPT "\${start_args[@]}"
 }
 
 stop_bg() {

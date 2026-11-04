@@ -1,6 +1,6 @@
 /** 与 Rust 侧（`src-tauri/src/*.rs`）及 docs/02-api-contract.md 对齐的类型定义。 */
 
-/** 服务器类型：直连（根节点）或挂在父服务器下面的转发目标。 */
+/** 服务器类型：直连（根节点）或挂在父服务器下面的代理服务器。 */
 export type ServerKind = "direct" | "relay";
 
 /** 转发链上的一跳（用于可点击的链展示）。 */
@@ -34,7 +34,7 @@ export interface ServerView {
   hasCustomSecret: boolean;
   /** 服务器地址非空。 */
   configured: boolean;
-  /** direct = 直连根节点；relay = 转发目标。 */
+  /** direct = 直连根节点；relay = 代理服务器。 */
   kind: ServerKind;
   /** 上级服务器 id；direct 为 null。 */
   parentId: string | null;
@@ -196,6 +196,14 @@ export interface ExtractResult {
   rootId?: string | null;
 }
 
+/** `POST /api/files/create` 的响应：新建文件/文件夹。 */
+export interface CreateResult {
+  root: string;
+  path: string;
+  type: "file" | "directory" | string;
+  name: string;
+}
+
 /** `POST /api/files/copy` 的响应（task-40）。 */
 export interface CopyResult {
   root: string;
@@ -306,6 +314,14 @@ export interface ActivateResult {
   deviceName: string;
   boundAt: string;
   serverTime: number;
+}
+
+/** 本机网络信息（`get_local_network_info`）：物理地址 + 默认路由网卡的局域网 IPv4。 */
+export interface LocalNetworkInfo {
+  /** 本机物理地址，大写冒号格式（如 `AA:BB:CC:DD:EE:FF`）；读不到为空串。 */
+  mac: string;
+  /** 默认路由网卡的局域网 IPv4（排除回环/链路本地）；读不到为空串。 */
+  ip: string;
 }
 
 /** `upload-progress` 事件 payload（契约 5.3）。 */

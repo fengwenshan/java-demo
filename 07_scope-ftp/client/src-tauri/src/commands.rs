@@ -1,17 +1,20 @@
 //! Tauri 命令：前端只能通过这里访问网络与本地配置。
 //!
-//! - AppKey / AppSecret 必填：必须与服务端启动时指定的一致，不再回退内置默认值；secret 不返回前端；
+//! - AppKey / AppSecret 必填：必须与服务端启动时指定的一致，不再回退内置默认值；
+//!   `get_config` 不返回 secret；用户点击密码框眼睛时通过 `reveal_server_secret`
+//!   按 id 读取本地自定义值返回给设置页显示；
 //! - 配置为多服务器 v3 树形结构：每台服务器独立的 serverUrl / deviceId / deviceName / 凭证，
 //!   relay 目标通过 `parentId` 指向上一跳，请求时按链签名（见 [`crate::api`]）；
 //! - 所有网络命令都作用于当前激活的 target 服务器（relay 时请求经整条链转发）；
 //! - 大文件上传自动走分片 + 断点续传（见 [`crate::uploads`]）。
 
 use serde::Serialize;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::api::{
-    Api, AuditLogPage, CopyResult, ExtractResult, FileContent, FileList, FileMeta, MoveResult,
-    RenameResult, SavedContent, StorageRoots, TerminalResult,
+    Api, AuditLogPage, CopyResult, CreateResult, ExtractResult, FileContent, FileList, FileMeta,
+    MoveResult, RenameResult, SavedContent, StorageRoots, TerminalResult,
 };
 use crate::config::{self, ConfigView, ServerProfile};
 use crate::uploads;
@@ -105,6 +108,38 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigView, String
     Ok(config.view())
 }
 
+/// 在用户点击密码框眼睛时返回一台已保存服务器的自定义 AppSecret。
+///
+/// 这是唯一会向前端返回 secret 的命令；`get_config` 仍然只返回 `hasSecret`，
+/// 不把 secret 放进常规配置视图。只允许查看自定义值，内置演示密钥不返回前端。
+#[tauri::command]
+pub async fn reveal_server_secret(
+    state: State<'_, AppState>,
+    id: Option<String>,
+) -> Result<String, String> {
+    let config = state
+        .config
+        .lock()
+        .map_err(|_| "配置状态异常，请重启客户端".to_string())?
+        .clone();
+    let server = match id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(id) => config.find(id).ok_or_else(|| "服务器不存在".to_string())?,
+        None => config.require_active()?,
+    };
+    if !server.has_custom_secret() {
+        return Err("该服务器使用内置 AppSecret，不能查看".to_string());
+    }
+    let secret = server.effective_app_secret().trim();
+    if secret.is_empty() {
+        return Err("该服务器未配置 AppSecret".to_string());
+    }
+    Ok(secret.to_string())
+}
+
 /// 新建或编辑一台服务器。
 ///
 /// - 不传 `id`：新建（生成 id 与独立 deviceId），并自动设为当前服务器；
@@ -152,7 +187,7 @@ pub async fn save_server(
     Ok(view)
 }
 
-/// 删除一台服务器及其所有转发目标（级联）：清理整棵子树的本地配置与续传状态；
+/// 删除一台服务器及其所有代理服务器（级联）：清理整棵子树的本地配置与续传状态；
 /// 允许删到空配置（返回的 `activeServer` 为 null）。
 #[tauri::command]
 pub async fn delete_server(state: State<'_, AppState>, id: String) -> Result<ConfigView, String> {
@@ -184,7 +219,7 @@ pub async fn delete_server(state: State<'_, AppState>, id: String) -> Result<Con
     Ok(view)
 }
 
-/// 新建 / 编辑一个「转发目标」（relay）：保存到 `parentId` 下并落盘。
+/// 新建 / 编辑一个「代理服务器」（relay）：保存到 `parentId` 下并落盘。
 ///
 /// - 不传 `id`：新建（生成独立 id 与 deviceId），自动设为 active；
 /// - 传 `id`：编辑，保留原 id 与 deviceId；
@@ -236,7 +271,7 @@ pub async fn save_relay(
     Ok(view)
 }
 
-/// 转发目标保存前的预览验证：按 `parentId` 解析父链 + 表单里的目标临时拼成链，
+/// 代理服务器保存前的预览验证：按 `parentId` 解析父链 + 表单里的目标临时拼成链，
 /// 先逐跳验证并激活 parent 链上的祖先（设计 4.9），再验证整条链可达且 target 的
 /// key/secret 正确；**不落盘，也不激活/写入最终 target**。
 ///
@@ -275,7 +310,7 @@ pub async fn verify_relay_preview(
         config
             .find(existing_id)
             .cloned()
-            .ok_or_else(|| "转发目标不存在".to_string())?
+            .ok_or_else(|| "代理服务器不存在".to_string())?
     } else {
         ServerProfile::new_relay(
             &name,
@@ -302,10 +337,10 @@ pub async fn verify_relay_preview(
         relay.app_secret = secret.to_string();
     }
     if relay.app_key.is_empty() {
-        return Err("转发目标 AppKey 必填".to_string());
+        return Err("代理服务器 AppKey 必填".to_string());
     }
     if relay.app_secret.trim().is_empty() {
-        return Err("转发目标 AppSecret 必填".to_string());
+        return Err("代理服务器 AppSecret 必填".to_string());
     }
     chain.push(relay);
 
@@ -338,6 +373,18 @@ pub async fn set_active_server(
         .lock()
         .map_err(|_| "配置状态异常，请重启客户端".to_string())? = config;
     Ok(view)
+}
+
+// ============================================================================
+// 本机信息
+// ============================================================================
+
+/// 本机网络信息：物理地址（MAC）与默认路由网卡的局域网 IPv4。
+///
+/// 只用于详情页展示，不写配置、不参与签名；取不到的字段为空串。
+#[tauri::command]
+pub fn get_local_network_info() -> crate::net::LocalNetworkInfo {
+    crate::net::local_network_info()
 }
 
 // ============================================================================
@@ -387,20 +434,76 @@ pub async fn verify_connection(state: State<'_, AppState>) -> Result<serde_json:
         .await
 }
 
-/// 添加服务器前的预览验证（契约 3.2）：直接用表单里的地址与凭据验证连接，
+/// 单独验证一台已保存服务器的连接（不切换 active、不激活设备）。
+///
+/// 用于左侧服务器列表的「当前一组服务器连通性检测」：relay 目标会沿 `parentId`
+/// 解析出完整链，但只做一次 verify，不调用 preflight/activate，避免检测动作改变设备状态。
+#[tauri::command]
+pub async fn verify_server(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let config = state
+        .config
+        .lock()
+        .map_err(|_| "配置状态异常，请重启客户端".to_string())?
+        .clone();
+    let target = config
+        .find(id.trim())
+        .ok_or_else(|| "服务器不存在".to_string())?;
+    let chain = config
+        .resolve_chain(&target.id)?
+        .into_iter()
+        .cloned()
+        .collect::<Vec<ServerProfile>>();
+    // verify 走的是完整转发链；目标不通时底层 reqwest 可能长时间阻塞，
+    // 这里显式限时，让左侧圆点从「检测中」及时落到灰色，而不是一直黄。
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        Api::from_chain(state.http.clone(), chain).verify_connection(),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err("连接超时（8 秒）".to_string()),
+    }
+}
+
+/// 添加 / 编辑服务器前的预览验证（契约 3.2）：直接用表单里的地址与凭据验证连接，
 /// **不读取、不写入已保存配置**，所以不需要先把服务器加入列表。
 ///
-/// 用于「添加服务器」页的「验证连接」：验证成功后再由前端调用 `save_server` 真正添加。
-/// 这里使用临时 deviceId/deviceName；`/api/auth/verify` 不校验设备绑定，
-/// 不会影响之后保存的服务器设备身份。
+/// - 添加页：`existing_id` 为空，使用临时 deviceId/deviceName；验证成功后再由前端调用
+///   `save_server` 真正添加。`/api/auth/verify` 不校验设备绑定，不会影响之后保存的身份。
+/// - 编辑页：`existing_id` 指向已保存的服务器，沿用其 deviceId/deviceName 和未修改的
+///   AppSecret（`app_secret` 为 `None` 表示保持原值，`Some("")` 表示清除自定义密钥回退内置值），
+///   用表单值覆盖地址 / AppKey；验证成功后才由前端保存，失败不落盘。
 #[tauri::command]
 pub async fn verify_connection_preview(
     state: State<'_, AppState>,
     server_url: String,
     app_key: Option<String>,
     app_secret: Option<String>,
+    existing_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let profile = preview_profile(&server_url, app_key.as_deref(), app_secret.as_deref())?;
+    let existing_id = existing_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let profile = match existing_id {
+        Some(id) => {
+            let config = state
+                .config
+                .lock()
+                .map_err(|_| "配置状态异常，请重启客户端".to_string())?
+                .clone();
+            saved_preview_profile(
+                &config,
+                id,
+                &server_url,
+                app_key.as_deref(),
+                app_secret.as_deref(),
+            )?
+        }
+        None => preview_profile(&server_url, app_key.as_deref(), app_secret.as_deref())?,
+    };
     Api::new(state.http.clone(), profile)
         .verify_connection()
         .await
@@ -421,6 +524,34 @@ fn preview_profile(
     let mut profile = ServerProfile::new("", &server_url, "");
     profile.app_key = app_key.unwrap_or_default().trim().to_string();
     profile.app_secret = app_secret.unwrap_or_default().trim().to_string();
+    Ok(profile)
+}
+
+/// 编辑已保存服务器时的预览验证配置（不落盘）：
+/// 沿用已保存的 id / deviceId / deviceName / 未修改的 secret，用表单值覆盖地址与 AppKey。
+///
+/// `app_secret == None` 表示保持原值；`Some("")` 表示清除自定义密钥（验证时回退内置值）。
+fn saved_preview_profile(
+    config: &config::AppConfig,
+    existing_id: &str,
+    server_url: &str,
+    app_key: Option<&str>,
+    app_secret: Option<&str>,
+) -> Result<ServerProfile, String> {
+    let mut profile = config
+        .find(existing_id)
+        .cloned()
+        .ok_or_else(|| "服务器不存在，请刷新后重试".to_string())?;
+    profile.server_url = config::normalize_server_url(server_url)?;
+    if profile.server_url.is_empty() {
+        return Err("请输入服务器地址".to_string());
+    }
+    if let Some(app_key) = app_key {
+        profile.app_key = app_key.trim().to_string();
+    }
+    if let Some(app_secret) = app_secret {
+        profile.app_secret = app_secret.trim().to_string();
+    }
     Ok(profile)
 }
 
@@ -710,9 +841,25 @@ pub async fn rename_server_file(
         .await
 }
 
+/// `POST /api/files/create`：在指定目录下新建空文件或文件夹。
+///
+/// `parent` 为空表示当前存储根目录；`kind` 只接受 `file` / `directory`。
+#[tauri::command]
+pub async fn create_server_entry(
+    state: State<'_, AppState>,
+    parent: String,
+    name: String,
+    kind: String,
+    root: Option<String>,
+) -> Result<CreateResult, String> {
+    api_from(&state)?
+        .create_server_entry(&parent, &name, &kind, root.as_deref())
+        .await
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ancestor_prefixes, preview_profile};
+    use super::{ancestor_prefixes, preview_profile, saved_preview_profile};
     use crate::config::ServerProfile;
 
     /// 构造一条 `A(direct) → B → C …` 的测试链（纯内存，不发网络请求）。
@@ -759,6 +906,60 @@ mod tests {
     fn preview_profile_rejects_empty_or_invalid_url() {
         assert!(preview_profile("   ", None, None).is_err());
         assert!(preview_profile("ftp://127.0.0.1:8080", None, None).is_err());
+    }
+
+    /// 编辑预览沿用已保存的 id / 设备身份 / secret，只覆盖表单里的地址与 AppKey。
+    #[test]
+    fn saved_preview_profile_keeps_identity_and_saved_secret() {
+        let mut config = crate::config::default_config();
+        let server = config.require_active().unwrap().clone();
+        config.servers[0].app_key = "saved-key".to_string();
+        config.servers[0].app_secret = "saved-secret".to_string();
+
+        let profile = saved_preview_profile(
+            &config,
+            &server.id,
+            "  http://127.0.0.1:9090/  ",
+            Some("new-key"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(profile.id, server.id);
+        assert_eq!(profile.device_id, server.device_id);
+        assert_eq!(profile.device_name, server.device_name);
+        assert_eq!(profile.server_url, "http://127.0.0.1:9090");
+        assert_eq!(profile.app_key, "new-key");
+        assert_eq!(profile.app_secret, "saved-secret");
+    }
+
+    /// 清空自定义 secret（`Some("")`）时预览回退内置值，与保存的语义一致。
+    #[test]
+    fn saved_preview_profile_clears_secret_for_builtin_fallback() {
+        let mut config = crate::config::default_config();
+        let server = config.require_active().unwrap().clone();
+        config.servers[0].app_secret = "saved-secret".to_string();
+
+        let profile = saved_preview_profile(
+            &config,
+            &server.id,
+            "http://127.0.0.1:9090",
+            None,
+            Some("   "),
+        )
+        .unwrap();
+        assert_eq!(profile.app_secret, "");
+        assert_eq!(profile.effective_app_secret(), crate::builtin::app_secret());
+    }
+
+    #[test]
+    fn saved_preview_profile_rejects_unknown_id_or_invalid_url() {
+        let config = crate::config::default_config();
+        assert!(
+            saved_preview_profile(&config, "missing", "http://127.0.0.1:9090", None, None).is_err()
+        );
+        let id = config.require_active().unwrap().id.clone();
+        assert!(saved_preview_profile(&config, &id, "   ", None, None).is_err());
+        assert!(saved_preview_profile(&config, &id, "ftp://127.0.0.1:8080", None, None).is_err());
     }
 
     /// 空链 / 单跳 direct 不触发 preflight（不多余 activate）。

@@ -31,7 +31,7 @@
 //! - 每台服务器有独立的 `id` / `deviceId` / `deviceName`；
 //! - `kind=direct` 是直连服务器，`kind=relay` 的 `parentId` 指向上一跳，形成 `A → B → C` 的树；
 //! - AppKey / AppSecret 默认内置（见 [`crate::builtin`]）；relay 必须显式填写，不回退内置值；
-//! - secret 落盘 0600、不返回前端；
+//! - secret 落盘 0600；常规视图不返回，仅设置页点击密码框眼睛时按 id 读取自定义值；
 //! - 旧版单配置（v1）与 v2 平铺列表在读取时自动迁移为 v3（全部按 direct 处理）。
 
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ pub const CONFIG_VERSION: u32 = 3;
 /// 转发链客户端安全上限（防止异常配置导致死循环；产品层不设层级限制）。
 const MAX_CHAIN_HOPS: usize = 64;
 
-/// 服务器类型：直连（direct）或转发目标（relay）。
+/// 服务器类型：直连（direct）或代理服务器（relay）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerKind {
@@ -88,7 +88,8 @@ pub struct ServerProfile {
     /// 自定义 AppKey；空串表示使用内置默认值。属于私有配置，不返回给前端展示值以外的内容。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app_key: String,
-    /// 自定义 AppSecret；空串表示使用内置默认值。落盘权限 0600，绝不返回前端。
+    /// 自定义 AppSecret；空串表示使用内置默认值。落盘权限 0600；
+    /// 常规视图不返回，仅设置页点击密码框眼睛时按 id 读取自定义值。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app_secret: String,
     /// 服务器类型：direct（直连）或 relay（通过上一跳转发访问）。
@@ -116,7 +117,7 @@ impl ServerProfile {
         }
     }
 
-    /// 新建一台转发目标（生成独立 id 与 deviceId，凭据必填）。
+    /// 新建一台代理服务器（生成独立 id 与 deviceId，凭据必填）。
     pub fn new_relay(
         name: &str,
         server_url: &str,
@@ -311,7 +312,7 @@ impl AppConfig {
             }
             chain.push(current);
             if chain.len() > MAX_CHAIN_HOPS {
-                return Err("转发层级过深，请检查转发目标配置".to_string());
+                return Err("转发层级过深，请检查代理服务器配置".to_string());
             }
             let Some(parent_id) = current.parent_id.as_deref() else {
                 break;
@@ -442,7 +443,7 @@ impl AppConfig {
                 .find(|server| server.id == id)
                 .ok_or_else(|| "服务器不存在，可能已被删除".to_string())?;
             if server.kind != ServerKind::Direct {
-                return Err("该服务器是转发目标，请通过转发目标设置保存".to_string());
+                return Err("该服务器是代理服务器，请通过代理服务器设置保存".to_string());
             }
             server.name = name;
             server.server_url = server_url;
@@ -471,7 +472,7 @@ impl AppConfig {
         Ok(server)
     }
 
-    /// 新建 / 编辑一个转发目标（relay）：
+    /// 新建 / 编辑一个代理服务器（relay）：
     /// - `id == None`：新建（生成 id 与 deviceId），并自动设为 active；
     /// - `id == Some`：编辑，保留原 id 与 deviceId；
     /// - `app_secret == None` 表示沿用已保存的 secret；新建或原有 secret 为空时必填；
@@ -502,7 +503,7 @@ impl AppConfig {
         let device_name = normalize_device_name(device_name)?;
         let app_key = normalize_credential(app_key, "AppKey", 128)?;
         if app_key.is_empty() {
-            return Err("转发目标 AppKey 必填".to_string());
+            return Err("代理服务器 AppKey 必填".to_string());
         }
         let app_secret = match app_secret {
             Some(value) => Some(normalize_credential(value, "AppSecret", 256)?),
@@ -517,7 +518,7 @@ impl AppConfig {
                 .ok_or_else(|| "服务器不存在，可能已被删除".to_string())?
                 .clone();
             if server.kind != ServerKind::Relay {
-                return Err("该服务器不是转发目标".to_string());
+                return Err("该服务器不是代理服务器".to_string());
             }
             server
         } else {
@@ -542,7 +543,7 @@ impl AppConfig {
             }
         }
         if relay.app_secret.trim().is_empty() {
-            return Err("转发目标 AppSecret 必填".to_string());
+            return Err("代理服务器 AppSecret 必填".to_string());
         }
         relay.ensure_ids();
 
@@ -1654,7 +1655,7 @@ mod tests {
             .unwrap();
         assert_eq!(edited.effective_app_secret(), "sb2");
 
-        // 通过 save_server 编辑 relay 应被拒绝，避免把转发目标当成直连改坏。
+        // 通过 save_server 编辑 relay 应被拒绝，避免把代理服务器当成直连改坏。
         assert!(config
             .save_server(Some(&b.id), "B2", "http://b2", "dev2")
             .is_err());

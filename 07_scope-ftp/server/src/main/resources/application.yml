@@ -102,7 +102,9 @@ app:
     max-output-bytes: 262144
     max-sessions: 50
   relay:
-    # 多级转发（/api/relay）总开关：默认关闭，作为中转节点的环境按需开启。
+    # 多级转发（/api/relay）总开关：配置默认关闭，避免所有节点默认成为代理。
+    # 本地 scripts/run-server.sh 和分包 start.sh 会默认注入 --app.relay.enabled=true，不需要手动开启；
+    # 直接 java -jar 或其它部署方式仍默认关闭，需要转发时显式传参/改环境文件。
     enabled: false
     # 链最多多少跳（含根），防滥用；产品层不设限。
     max-hops: 16
