@@ -73,7 +73,7 @@ ScopeFTP 是一个文件上传/管理桌面应用：服务端 `ScopeFTP-server`�
 客户端每天本机时间 **10:00、16:00** 自动检查更新；启动时如果距上次检查超过 6 小时会补检一次。
 发现新版本后会在后台自动下载、安装，完成后弹窗让用户确认是否立即重启（上传进行中不会强制重启）。
 
-- 更新包使用 Tauri 签名校验，更新清单是 GitHub Release 的 `latest.json`。
+- 更新包使用 Tauri 签名校验，更新清单是 GitHub Release 的 `latest.json`；macOS 使用 `.app.tar.gz`，Windows 使用 NSIS 安装包 `.exe`。
 - 首次从 v1.0.2 升级需要手动安装一次 v1.0.3；从 v1.0.3 起可以自动更新到后续版本。
 - 发布时客户端版本必须与 tag 一致（例如 tag `v1.0.3` 对应 `1.0.3`）。
 - CI 需要仓库 Secret `TAURI_SIGNING_PRIVATE_KEY`（私钥），否则构建会直接失败，不会产出未签名更新包。
