@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, App as AntdApp, Button, Empty, Layout, Spin, Typography } from "antd";
+import { getVersion } from "@tauri-apps/api/app";
 
 import {
   deleteServer,
@@ -22,6 +23,7 @@ import ServerSidebar from "./components/ServerSidebar";
 import ServerBrowser from "./pages/ServerBrowser";
 import ServerDetailPage from "./pages/ServerDetailPage";
 import SettingsPage from "./pages/SettingsPage";
+import { useAutoUpdate } from "./update/useAutoUpdate";
 
 const { Content } = Layout;
 const { Text } = Typography;
@@ -62,6 +64,15 @@ export default function App() {
   const [activeRootId, setActiveRootId] = useState<string | null>(null);
   /** 每台服务器记住上次选择的存储根（仅内存，重启后回到 defaultRootId）。 */
   const rootByServerRef = useRef<Record<string, string>>({});
+  const [clientVersion, setClientVersion] = useState("—");
+  const autoUpdate = useAutoUpdate(isTauri() && !browserMode);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    void getVersion()
+      .then(setClientVersion)
+      .catch(() => setClientVersion("—"));
+  }, []);
 
   // 全局关闭 WebView 默认右键菜单（Reload / Inspect Element 等）；
   // 输入框、文本域和可编辑区域保留系统编辑菜单（复制/粘贴）。
@@ -456,6 +467,10 @@ export default function App() {
           connection={connection}
           serverHealth={serverHealth}
           configured={configured}
+          clientVersion={clientVersion}
+          updatePhase={autoUpdate.phase}
+          availableUpdateVersion={autoUpdate.availableVersion}
+          onCheckUpdate={() => void autoUpdate.checkNow(true)}
           roots={roots}
           activeRootId={activeRoot?.id ?? null}
           onSelectRoot={handleSelectRoot}

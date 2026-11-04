@@ -1,6 +1,6 @@
 [package]
 name = "scopeftp"
-version = "0.1.0"
+version = "1.0.3"
 description = "ScopeFTP 桌面客户端"
 authors = ["wenshan"]
 edition = "2021"
@@ -22,6 +22,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # HTTP 全部走 Rust 侧；TLS 使用 rustls + ring（环境无 cmake，不能用 aws-lc-rs）

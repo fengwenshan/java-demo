@@ -86,6 +86,8 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let config_path = config::config_path(app.handle()).map_err(std::io::Error::other)?;
             let upload_state_path = config_path

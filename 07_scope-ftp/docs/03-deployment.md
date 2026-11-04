@@ -121,7 +121,7 @@ app:
 
 ### 2.1 获取构建产物
 
-不再在本地打包。推送 `v*` tag 后由仓库根目录的 `.github/workflows/scope-ftp.yml` 构建，在 Actions 的 **ScopeFTP-Server-package** artifact 中下载部署 zip；默认始终有 `ScopeFTP-Server.zip`（内部固定 `ScopeFTP-Server/` + `ScopeFTP-Server.jar` + `start.sh` + `scop-ftp.env`），私有配置齐全时额外有 `ScopeFTP-Server-xiaoshan.zip` / `ScopeFTP-Server-xihu.zip`。普通 `main` push / PR / 手动发布 Release 不触发构建。
+不再在本地打包。推送 `v*` tag 后由仓库根目录的 `.github/workflows/scope-ftp.yml` 构建，在 Actions 的 **ScopeFTP-Server-package** artifact 中下载部署 zip；客户端同时生成 Tauri updater 更新包和 `latest.json`，需要配置 `TAURI_SIGNING_PRIVATE_KEY` Secret，详见 `docs/05-ci.md`。默认始终有 `ScopeFTP-Server.zip`（内部固定 `ScopeFTP-Server/` + `ScopeFTP-Server.jar` + `start.sh` + `scop-ftp.env`），私有配置齐全时额外有 `ScopeFTP-Server-xiaoshan.zip` / `ScopeFTP-Server-xihu.zip`。普通 `main` push / PR / 手动发布 Release 不触发构建。
 
 ### 2.2 上传与安装
 
