@@ -7,6 +7,8 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 
+import com.wenshan.upload.config.CredentialPreflight;
+
 /**
  * ScopeFTP-server 入口。
  *
@@ -26,7 +28,10 @@ public class UploadApplication {
     private static final String APP_SECRET_PROPERTY = "--app.security.clients[0].app-secret";
 
     public static void main(String[] args) {
-        SpringApplication.run(UploadApplication.class, normalizeCredentialArgs(args));
+        SpringApplication application = new SpringApplication(UploadApplication.class);
+        // 在创建 Bean 之前先检查凭证，缺 key/secret 时只打印一条可操作提示，不刷 Spring 堆栈。
+        application.addInitializers(new CredentialPreflight());
+        application.run(normalizeCredentialArgs(args));
     }
 
     /**

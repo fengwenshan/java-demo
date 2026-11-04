@@ -28,7 +28,7 @@ ScopeFTP 是一个文件上传/管理桌面应用：服务端 `ScopeFTP-server`�
 - **右键菜单**：目录/文件行右击可「重命名」「删除」；重命名直接在行内名称单元格编辑（回车/失焦保存、Esc 取消），支持文件与目录（严格同根校验、不覆盖同名）；删除支持文件与目录，目录非空时先列目录统计项数并强提示「目录非空（共 N 项），其中的文件和子目录会一并删除，且不可恢复」，二次确认后递归删除（含嵌套存储根拒绝、symlink 不跟随）
 - **多存储根目录**：服务端可配置多个存储根（各环境文件的 `app.storage.roots[]`，`id`/`name`/`path`），客户端左侧「存储目录」切换；所有浏览/上传/下载/删除/搜索都严格限制在选中的根内，跨根/根外操作一律拒绝；单根 `root-dir` 已删除，roots 为空启动失败
 - **存储目录可配置且严格受限**：各环境文件用 `app.storage.roots[]` 指定服务器存储根目录（dev 是 `./data`、docker 是 `/app/data`），服务端只能在配置的根内读写删（拒绝 `../`、绝对路径、符号链接逃逸、跨根），客户端无法指定服务器路径
-- 全链路测试 329 个（JUnit 5 + MockMvc + 固定 Clock 签名向量 + SQLite MetaStore 并发/重启/迁移 + 存储目录约束 + FTP 式按目录上传/路径下载删除 + 分片上传/续传/搜索/限流 + 多存储根隔离 + 重命名/递归删除目录（含嵌套存储根拒绝）+ 客户端身份/黑名单/verify→activate 顺序 + 解压剥层/拷贝移动 + 审计 SQLite/查询接口测试 + relay 链头/每跳签名/3 跳/8MB 流式/SSRF/错误映射/审计迁移）
+- 全链路测试 335 个（JUnit 5 + MockMvc + 固定 Clock 签名向量 + SQLite MetaStore 并发/重启/迁移 + 存储目录约束 + FTP 式按目录上传/路径下载删除 + 分片上传/续传/搜索/限流 + 多存储根隔离 + 重命名/递归删除目录（含嵌套存储根拒绝）+ 客户端身份/黑名单/verify→activate 顺序 + 解压剥层/拷贝移动 + 审计 SQLite/查询接口测试 + relay 链头/每跳签名/3 跳/8MB 流式/SSRF/错误映射/审计迁移）
 
 **客户端**
 
@@ -107,8 +107,9 @@ ScopeFTP 是一个文件上传/管理桌面应用：服务端 `ScopeFTP-server`�
 
 ```bash
 cd 07_scope-ftp
-# 凭证没有内置默认值，启动时显式传参（不写进 scripts/env*）
-./scripts/run-server.sh --app-key my-key --app-secret my-secret   # 首次无 Jar 会自动构建，监听 9090
+# 凭证没有内置默认值；AppSecret 任意非空即可，生产推荐用 openssl 生成
+APP_SECRET="$(openssl rand -hex 32)"
+./scripts/run-server.sh --app-key my-key --app-secret "$APP_SECRET"   # 首次无 Jar 会自动构建，监听 9090
 # 健康检查（开启客户端身份强制后需带 X-Device-Mac）：
 curl -H 'X-Device-Mac: 02:00:00:00:00:01' http://127.0.0.1:9090/api/health
 ```
@@ -119,6 +120,8 @@ curl -H 'X-Device-Mac: 02:00:00:00:00:01' http://127.0.0.1:9090/api/health
 服务端配置分两层：入库的 `server/src/main/resources/application.yml` 自带端口/存储/日志默认值
 （9090、`./data`、`./logs/audit`），**但客户端凭证没有默认值**；没有 dev/prod 环境文件也能打包，
 启动时必须显式传 `--app-key` / `--app-secret`，缺失会直接启动失败。
+`run-server.sh` 和直接 `java -jar` 都会在启动前一次性提示这两项；AppSecret 不是只能填 32 字节，
+任意非空字符串即可（少于 32 字符服务端只警告不阻止），推荐 `openssl rand -hex 32`。
 需要覆盖其它配置时在本地放 `application-<env>.yml`（**均不入库**，见 `.gitignore`），启动时用 `--env` 选择。
 
 | 环境 | 启动方式 | 端口 | 存储根 | 审计 / 运行日志 |
@@ -181,10 +184,11 @@ pnpm tauri dev
 
 ```bash
 # 直接启动 Jar（从 GitHub Actions 下载，或本地已有 Jar）
-java -jar ScopeFTP-server-*.jar --spring.profiles.active=dev --app-key my-key --app-secret my-secret
+APP_SECRET="$(openssl rand -hex 32)"
+java -jar ScopeFTP-server-*.jar --spring.profiles.active=dev --app-key my-key --app-secret "$APP_SECRET"
 
 # 本地脚本（--app-key/--app-secret 透传给服务端，映射到第一个预配发客户端）
-./scripts/run-server.sh --app-key my-key --app-secret my-secret
+./scripts/run-server.sh --app-key my-key --app-secret "$APP_SECRET"
 ```
 
 ### 2. 不启动客户端也能验证接口
@@ -202,7 +206,7 @@ APP_KEY=my-key APP_SECRET=my-secret E2E_ROOTS="work=./work,media=./media" E2E_ST
 
 - **只有推送 `v*` tag（如 `v1.0.0`）才触发构建**；普通 `main` push、PR、手动发布 Release 都不会触发
 - tag 构建完成后自动上传 Actions Artifacts，并创建 GitHub Release 上传服务端 Jar、分环境包和客户端安装包
-- 服务端：跑 329 个测试、打 `ScopeFTP-server` Jar；私有生产配置（萧山/西湖）由 GitHub Secrets 注入后再生成分环境包（包内固定 `ftp-server/` + `ftp-server.jar`；CI 为区分环境把 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip`）；**启动时没有凭证会失败**
+- 服务端：跑 335 个测试、打 `ScopeFTP-server` Jar；私有生产配置（萧山/西湖）由 GitHub Secrets 注入后再生成分环境包（包内固定 `ftp-server/` + `ftp-server.jar`；CI 为区分环境把 `ftp-server.zip` 复制成 `ftp-server-xiaoshan.zip` / `ftp-server-xihu.zip`）；**启动时没有凭证会失败**
 - 客户端：macOS ARM64 / Intel DMG、Windows x64 免安装 exe + NSIS 安装包（`.exe`），全部作为 Actions Artifacts 下载
 
 所有 `server/src/main/resources/application-<env>.yml` 环境文件（dev/docker/xiaoshan/xihu）**一律不入库**

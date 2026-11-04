@@ -917,5 +917,5 @@ Query：
   **所有文件读写删除都限制在 root 内**：拒绝绝对路径、`..` 段、以及指向 root 外的符号链接（normalize + `toRealPath` 校验），并拒绝内部目录 `.upload-meta`
 - 客户端只能指定**相对 root 且已存在**的上传目录（`dir`）与相对 root 的下载/删除路径，不能指定 root 外路径；`verify` 只回显只读的 `storageDir`
 - 配置项使用 `@ConfigurationProperties(prefix = "app")`；只有客户端凭证支持环境变量注入（`UPLOAD_APP_KEY` / `UPLOAD_APP_SECRET`），其余配置都在环境文件里
-- 凭证没有内置默认值：`app.security.clients[].appKey/appSecret` 必须由 `UPLOAD_APP_KEY` / `UPLOAD_APP_SECRET`、启动参数 `--app-key`/`--app-secret` 或当前环境文件提供；缺失时启动阶段快速失败（`AppProperties#afterPropertiesSet` 校验非空、唯一、至少一个启用客户端）
+- 凭证没有内置默认值：`app.security.clients[].appKey/appSecret` 必须由 `UPLOAD_APP_KEY` / `UPLOAD_APP_SECRET`、启动参数 `--app-key`/`--app-secret` 或当前环境文件提供；缺失时启动前由 `CredentialPreflight` 打印一次性提示并退出（直接 `java -jar` 也生效），完整校验仍由 `AppProperties#afterPropertiesSet` 负责（非空、唯一、至少一个启用客户端）
 - 测试：JUnit 5 + `@SpringBootTest` + MockMvc，覆盖签名测试向量、过期、重放、错误签名、上传-列表-下载-删除全链路

@@ -221,7 +221,8 @@ CI 里生产配置由 GitHub Secrets 注入后再构建。本地保留自己的�
 分环境包里的 `start.sh` 已自动带 `--spring.profiles.active=<profile>`（default 包不带 profile，使用 `application.yml`），默认后台运行，日志写入包内 `logs/console.log`；解压后目录固定为 `ftp-server/`，Jar 固定为 `ftp-server.jar`：
 
 ```bash
-./start.sh --app-key=xxx --app-secret=yyy   # 后台启动，返回后服务继续运行
+APP_SECRET="$(openssl rand -hex 32)"
+./start.sh --app-key=xxx --app-secret="$APP_SECRET"   # 后台启动，返回后服务继续运行
 ./start.sh logs         # 跟随日志；Ctrl+C 只退出日志，不会停服务
 ./start.sh status
 ./start.sh stop
@@ -232,24 +233,28 @@ CI 里生产配置由 GitHub Secrets 注入后再构建。本地保留自己的�
 `--app-key` / `--app-secret` 是**必传凭证**，启动时直接传参，不写入包内 `scop-ftp.env`；其余参数可选（方括号表示可选）：
 
 ```bash
-./start.sh --app-key=xxx --app-secret=yyy [--server.port=xxx] [--spring.profiles.active=xxx] [其它 Spring 参数...]
-./start.sh --app-key=my-key --app-secret=my-secret          # 前台
-./start.sh start --app-key=my-key --app-secret=my-secret    # 后台
+./start.sh --app-key=xxx --app-secret="$APP_SECRET" [--server.port=xxx] [--spring.profiles.active=xxx] [其它 Spring 参数...]
+./start.sh --app-key=my-key --app-secret="$APP_SECRET"          # 前台
+./start.sh start --app-key=my-key --app-secret="$APP_SECRET"    # 后台
 ```
 
-凭证没有内置默认值：启动命令没传 `--app-key` / `--app-secret` 时，`start.sh` 会在启动前直接报错，不会先拉起进程再失败。
+凭证没有内置默认值：启动命令没传 `--app-key` / `--app-secret` 时，`start.sh` 会直接报错；
+直接 `java -jar` 也会在启动前打印一次性提示并退出，不会先拉起完整 Spring 再刷堆栈。
+AppSecret 任意非空字符串即可，不是只能填 32 字节（少于 32 字符服务端只警告、不阻止启动），
+生产推荐 `openssl rand -hex 32`。
 
 临时换密钥（每次启动都传参数；直接传参数时前台运行，后台运行请用 `./start.sh start ...`）：
 
 ```bash
 # 直接启动 Jar：简写参数会被映射到第一个预配发客户端
-java -jar ScopeFTP-server-1.0.0.jar --spring.profiles.active=xiaoshan --app-key my-key --app-secret my-secret
+APP_SECRET="$(openssl rand -hex 32)"
+java -jar ScopeFTP-server-1.0.0.jar --spring.profiles.active=xiaoshan --app-key my-key --app-secret "$APP_SECRET"
 
 # 分环境包里的 start.sh 也支持
-./start.sh --app-key my-key --app-secret my-secret
+./start.sh --app-key my-key --app-secret "$APP_SECRET"
 
 # 或完整 Spring 属性
-./start.sh --app.security.clients[0].app-key=my-key --app.security.clients[0].app-secret=my-secret
+./start.sh --app.security.clients[0].app-key=my-key --app.security.clients[0].app-secret="$APP_SECRET"
 ```
 
 ### 2.4 Nginx + HTTPS

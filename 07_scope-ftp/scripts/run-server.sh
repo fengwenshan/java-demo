@@ -4,6 +4,8 @@
 #
 # 凭证必须显式指定：--app-key/--app-secret；缺失时脚本会在启动前一次性提示并退出，
 # 不会先拉起 Spring 再打印长堆栈；服务端没有内置默认值。
+# AppSecret 任意非空即可，不是只能填 32 字节；少于 32 字符服务端只警告。生产推荐：
+#   APP_SECRET="$(openssl rand -hex 32)"
 #
 # 用法：
 #   ./scripts/run-server.sh [--env <环境名>] [--build] [--app-key KEY] [--app-secret SECRET] [其它 Spring Boot 参数...]
@@ -101,6 +103,23 @@ done
 APP_KEY_VALUE="${CLI_APP_KEY:-${UPLOAD_APP_KEY:-}}"
 APP_SECRET_VALUE="${CLI_APP_SECRET:-${UPLOAD_APP_SECRET:-}}"
 
+print_credential_help() {
+  cat >&2 <<EOF
+
+请一次性提供两项（服务端没有内置默认凭证）：
+  APP_SECRET="\$(openssl rand -hex 32)"
+  ./scripts/run-server.sh --env ${ENV_NAME} --app-key demo-app --app-secret "\$APP_SECRET"
+
+AppKey 任意非空即可；AppSecret 任意非空字符串即可，不是只能填 32 字节。
+服务端只对少于 32 字符的 AppSecret 提示，不会阻止启动；生产推荐随机密钥：
+  openssl rand -hex 32
+
+也可以使用环境变量：
+  APP_SECRET="\$(openssl rand -hex 32)"
+  UPLOAD_APP_KEY=demo-app UPLOAD_APP_SECRET="\$APP_SECRET" ./scripts/run-server.sh --env ${ENV_NAME}
+EOF
+}
+
 if [[ -z "$APP_KEY_VALUE" || -z "$APP_SECRET_VALUE" ]]; then
   echo "==> 启动凭证不完整，已停止启动（不会拉起 Spring）" >&2
   if [[ -z "$APP_KEY_VALUE" && -z "$APP_SECRET_VALUE" ]]; then
@@ -110,15 +129,11 @@ if [[ -z "$APP_KEY_VALUE" || -z "$APP_SECRET_VALUE" ]]; then
   else
     echo "    缺少 --app-secret" >&2
   fi
-  echo "" >&2
-  echo "请一次性提供两项（服务端没有内置默认凭证）：" >&2
-  echo "  ./scripts/run-server.sh --env ${ENV_NAME} --app-key demo-app --app-secret 'demo-secret-please-change-32-bytes'" >&2
-  echo "" >&2
-  echo "也可以使用环境变量：" >&2
-  echo "  UPLOAD_APP_KEY=demo-app UPLOAD_APP_SECRET='demo-secret-please-change-32-bytes' ./scripts/run-server.sh --env ${ENV_NAME}" >&2
-  echo "" >&2
-  echo "修改凭证后重新执行上面的命令即可；不要只传 --app-key。" >&2
+  print_credential_help
   exit 1
+elif (( ${#APP_SECRET_VALUE} < 32 )); then
+  echo "==> 提示：AppSecret 只有 ${#APP_SECRET_VALUE} 个字符" >&2
+  echo "    服务端允许启动（只提示、不阻止）；生产建议用 openssl rand -hex 32 生成随机密钥" >&2
 fi
 
 # 端口只用于启动前的占用检查与健康检查提示，真正端口以配置文件为准

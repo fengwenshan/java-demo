@@ -179,7 +179,7 @@ sqlite3 "$DB" "DELETE FROM client_blacklist_mac WHERE mac='AA:BB:CC:DD:EE:FF';"
 
 ## 6. 验证方式
 
-- 服务端单元/集成测试：签名测试向量、过期、重放、错误签名、哈希篡改、设备绑定、relay 链头/每跳签名/3 跳/流式/SSRF/错误映射/审计来源；`ClientIdentityGuardIntegrationTest` 覆盖缺 MAC/IP 封禁、MAC/IP 两张黑名单 OR 拦截、activate 乱序封禁、手动删行立即解封（329 passed）
+- 服务端单元/集成测试：签名测试向量、过期、重放、错误签名、哈希篡改、设备绑定、relay 链头/每跳签名/3 跳/流式/SSRF/错误映射/审计来源；`ClientIdentityGuardIntegrationTest` 覆盖缺 MAC/IP 封禁、MAC/IP 两张黑名单 OR 拦截、activate 乱序封禁、手动删行立即解封（335 passed）
 - 端到端脚本：`E2E_STORAGE_ROOT=<root> node scripts/e2e.mjs`（真实 HTTP，覆盖 40100/40101/40102/40001/40003/40300 等错误路径，以及按目录上传/路径下载删除/越界）；开启 `client-identity-enforced` 后同样 55 passed（所有请求带 `X-Device-Mac`）
 
 ## 7. 接口认证覆盖检查（2026-10-30）
@@ -195,7 +195,7 @@ sqlite3 "$DB" "DELETE FROM client_blacklist_mac WHERE mac='AA:BB:CC:DD:EE:FF';"
 
 ### 当前仍需注意的边界
 
-1. **凭证已改为必填，但客户端二进制里仍留有演示默认值**：服务端已去掉 demo 兜底，`application.yml` / 各环境文件里 `appKey`/`appSecret` 为空时启动阶段直接失败（`AppProperties#afterPropertiesSet`），必须由环境变量、`--app-key`/`--app-secret` 或环境文件显式指定；客户端「设置」页也把两项改为必填，IPC 保存时拒绝空值。仍需注意：`src-tauri/src/builtin.rs` 仍编译进一份演示 AppKey/AppSecret 作为旧配置兜底，发布构建务必用 `UPLOAD_CLIENT_APP_KEY` / `UPLOAD_CLIENT_APP_SECRET` 覆盖，生产密钥用 `openssl rand -hex 32` 生成并定期轮换。
+1. **凭证已改为必填，但客户端二进制里仍留有演示默认值**：服务端已去掉 demo 兜底，`application.yml` / 各环境文件里 `appKey`/`appSecret` 为空时启动阶段直接失败（`CredentialPreflight` 先打印一次性提示，`AppProperties#afterPropertiesSet` 再做完整校验），必须由环境变量、`--app-key`/`--app-secret` 或环境文件显式指定；客户端「设置」页也把两项改为必填，IPC 保存时拒绝空值。仍需注意：`src-tauri/src/builtin.rs` 仍编译进一份演示 AppKey/AppSecret 作为旧配置兜底，发布构建务必用 `UPLOAD_CLIENT_APP_KEY` / `UPLOAD_CLIENT_APP_SECRET` 覆盖，生产密钥用 `openssl rand -hex 32` 生成并定期轮换。
 2. **AppKey 是客户端级共享密钥，不是用户账号**：任何有效 appKey 都能访问全部存储根；没有按用户/租户的 ACL。分片上传的 status/cancel/chunk 也没有绑定 appKey（需要不可猜的 uploadId），多客户端互不信任时应再加会话归属校验。
 3. **设备绑定只作用于 `/api/files`**：开启 `DEVICE_BINDING_ENABLED=true` 后，终端 `/api/terminal/exec`、审计查询、存储根查询仍只校验签名，不校验 deviceId；终端默认还是开启的，生产环境文件应显式 `app.terminal.enabled: false` 或再加设备绑定。开启 `client-identity-enforced` 后 MAC/IP 黑名单对**全部** `/api/**` 生效（含终端/审计），但只拦“已封禁/缺身份/乱序”，不做 deviceId 绑定。
 4. **`GET /api/health` 无需签名**：只返回状态与时间，不返回文件/路径/密钥信息；开启 `client-identity-enforced` 后仍需带合法 `X-Device-Mac`，否则 40312 并被写入黑名单（探活/监控必须带头）。
