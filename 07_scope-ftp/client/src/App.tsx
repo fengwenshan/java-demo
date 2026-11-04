@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, App as AntdApp, Button, Empty, Layout, Spin, Typography } from "antd";
 
 import {
+  deleteServer,
   errorMessage,
   getConfig,
   isTauri,
@@ -404,6 +405,22 @@ export default function App() {
     [refreshConnection],
   );
 
+  /** 详情页删除：服务端级联删除整棵子树，然后刷新列表/当前服务器。 */
+  const handleDeleteServer = useCallback(
+    async (id: string) => {
+      const target = config?.servers.find((item) => item.id === id);
+      try {
+        const next = await deleteServer(id);
+        message.success(`已删除「${target?.name ?? "服务器"}」`);
+        await handleServerDeleted(next, id);
+      } catch (error) {
+        message.error(errorMessage(error));
+        throw error;
+      }
+    },
+    [config?.servers, handleServerDeleted, message],
+  );
+
   const handleVerified = useCallback(
     (data: VerifyResult) => {
       setVerify(data);
@@ -500,6 +517,7 @@ export default function App() {
                 server={detailServer}
                 isActiveServer={detailServer.id === activeServer?.id}
                 connection={connection}
+                servers={config?.servers ?? []}
                 verify={detailServer.id === activeServer?.id ? verify : null}
                 roots={detailServer.id === activeServer?.id ? roots : []}
                 browserMode={browserMode}
@@ -508,6 +526,7 @@ export default function App() {
                 onSelectServer={handleSelectServer}
                 onRecheck={handleRecheck}
                 onAddRelay={handleAddRelay}
+                onDelete={handleDeleteServer}
               />
             ) : (
               <div className="empty-config" data-testid="server-detail-missing">

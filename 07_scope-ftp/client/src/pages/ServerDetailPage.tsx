@@ -1,15 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
   Card,
   Descriptions,
+  Popconfirm,
   Space,
   Tag,
   Tooltip,
   Typography,
 } from "antd";
 import {
+  DeleteOutlined,
   DesktopOutlined,
   EditOutlined,
   FolderOpenOutlined,
@@ -35,6 +37,8 @@ export interface ServerDetailPageProps {
   /** 是否为当前服务器：只有当前服务器才有真实的连接/绑定/存储目录数据。 */
   isActiveServer: boolean;
   connection: ConnectionState;
+  /** 本地全部服务器（用于计算删除时会级联的子树数量）。 */
+  servers: ServerView[];
   /** 当前服务器的验证结果；非当前服务器时为 null。 */
   verify: VerifyResult | null;
   /** 当前服务器的存储根；非当前服务器时为空。 */
@@ -50,6 +54,8 @@ export interface ServerDetailPageProps {
   onRecheck: () => void | Promise<void>;
   /** 在当前服务器下新建代理服务器。 */
   onAddRelay: (parentId: string) => void;
+  /** 删除服务器（服务端会级联删除其下所有代理服务器）。 */
+  onDelete: (id: string) => Promise<void>;
 }
 
 /**
@@ -62,6 +68,7 @@ export default function ServerDetailPage({
   server,
   isActiveServer,
   connection,
+  servers,
   verify,
   roots,
   browserMode,
@@ -70,8 +77,53 @@ export default function ServerDetailPage({
   onSelectServer,
   onRecheck,
   onAddRelay,
+  onDelete,
 }: ServerDetailPageProps) {
   const inactiveHint = "切换为当前服务器后可查看";
+  const [deleting, setDeleting] = useState(false);
+
+  /** 删除时会被级联删除的整棵子树数量。 */
+  const subtreeCount = useMemo(() => {
+    let count = 0;
+    const walk = (id: string) => {
+      for (const item of servers) {
+        if (item.parentId === id) {
+          count += 1;
+          walk(item.id);
+        }
+      }
+    };
+    walk(server.id);
+    return count;
+  }, [server.id, servers]);
+
+  const remainingAfterDelete = servers.length - 1 - subtreeCount;
+
+  const deleteDescription = (() => {
+    const parts: string[] = [];
+    if (subtreeCount > 0) {
+      parts.push(
+        `会同时删除其下 ${subtreeCount} 个代理服务器的本地配置和续传状态，不会删除服务器上的文件。`,
+      );
+    } else {
+      parts.push("会删除该服务器的本地配置与未完成的续传状态，不会删除服务端文件。");
+    }
+    if (remainingAfterDelete <= 0) {
+      parts.push("这是最后一台服务器，删除后进入空配置。");
+    }
+    return parts.join("");
+  })();
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await onDelete(server.id);
+    } catch {
+      // 父组件已经弹出错误提示；这里只负责恢复按钮状态。
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   /** 本机 MAC / 局域网 IP：进入页面时取一次，取不到显示「未获取到」。 */
   const [localNet, setLocalNet] = useState<LocalNetworkInfo | null>(null);
@@ -124,7 +176,7 @@ export default function ServerDetailPage({
           </Space>
         }
         extra={
-          <Space>
+          <Space wrap>
             <Tooltip title={browseDisabledReason || "打开该服务器的目录浏览"}>
               <span className="tooltip-button-wrap">
                 <Button
@@ -163,6 +215,34 @@ export default function ServerDetailPage({
                 >
                   代理服务器
                 </Button>
+              </span>
+            </Tooltip>
+            <Tooltip title={browserMode ? "浏览器预览环境不可用" : "删除该服务器"}>
+              <span className="tooltip-button-wrap">
+                <Popconfirm
+                  title={
+                    server.kind === "relay"
+                      ? `删除代理服务器「${server.name}」？`
+                      : `删除服务器「${server.name}」？`
+                  }
+                  description={deleteDescription}
+                  okText="删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => void handleDelete()}
+                >
+                  <Button
+                    size="small"
+                    danger
+                    type="text"
+                    icon={<DeleteOutlined />}
+                    loading={deleting}
+                    disabled={browserMode || deleting}
+                    data-testid="server-detail-delete"
+                  >
+                    {server.kind === "relay" ? "删除代理服务器" : "删除服务器"}
+                  </Button>
+                </Popconfirm>
               </span>
             </Tooltip>
           </Space>
