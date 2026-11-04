@@ -1,8 +1,9 @@
 //! Tauri 命令：前端只能通过这里访问网络与本地配置。
 //!
 //! - AppKey / AppSecret 必填：必须与服务端启动时指定的一致，不再回退内置默认值；secret 不返回前端；
-//! - 配置为多服务器 v2：每台服务器独立的 serverUrl / deviceId / deviceName / 凭证；
-//! - 所有网络命令都作用于当前激活的服务器；
+//! - 配置为多服务器 v3 树形结构：每台服务器独立的 serverUrl / deviceId / deviceName / 凭证，
+//!   relay 目标通过 `parentId` 指向上一跳，请求时按链签名（见 [`crate::api`]）；
+//! - 所有网络命令都作用于当前激活的 target 服务器（relay 时请求经整条链转发）；
 //! - 大文件上传自动走分片 + 断点续传（见 [`crate::uploads`]）。
 
 use serde::Serialize;
@@ -25,15 +26,68 @@ struct UploadProgress {
     total: u64,
 }
 
-/// 用「当前激活服务器」的地址与设备身份构造 HTTP 客户端。
-fn api_from(state: &AppState) -> Result<Api, String> {
-    let server = state
+/// 解析当前激活服务器的完整转发链（root → target）。
+fn active_chain(state: &AppState) -> Result<Vec<ServerProfile>, String> {
+    let config = state
         .config
         .lock()
         .map_err(|_| "配置状态异常，请重启客户端".to_string())?
-        .require_active()?
         .clone();
-    Ok(Api::new(state.http.clone(), server))
+    let active = config.require_active()?;
+    Ok(config
+        .resolve_chain(&active.id)?
+        .into_iter()
+        .cloned()
+        .collect::<Vec<ServerProfile>>())
+}
+
+/// 用「当前激活服务器」的转发链构造 HTTP 客户端（root → target）。
+fn api_from(state: &AppState) -> Result<Api, String> {
+    Ok(Api::from_chain(state.http.clone(), active_chain(state)?))
+}
+
+/// 转发链的祖先前缀（root → target 的上一跳），用于逐跳预激活（设计 4.9）。
+///
+/// - `[A, B, C]` → `[[A], [A, B]]`（C 是 target，不包含）；
+/// - `[A, B]` → `[[A]]`；
+/// - `[A]` / 空 → `[]`（直连或空配置不做 preflight）。
+fn ancestor_prefixes(chain: &[ServerProfile]) -> Vec<Vec<ServerProfile>> {
+    if chain.len() <= 1 {
+        return Vec::new();
+    }
+    (1..chain.len())
+        .map(|length| chain[..length].to_vec())
+        .collect()
+}
+
+/// 逐跳预激活祖先服务器（设计 4.9）：
+/// 按 root → target 上一跳的顺序，对每个前缀执行 `verify_connection()` + `activate()`。
+///
+/// 中间跳（relay 节点）自己的 `/api/relay/**` 请求会做设备绑定检查，所以必须先用
+/// 它自己的 deviceId/deviceName 完成 verify → activate；否则 3 跳以上访问文件接口会收到
+/// 40300。最终 target 不在这里 activate（UI 在验证连接后自己激活 target）。
+///
+/// 任一跳失败立即返回「转发链第 N 跳 <name> 验证/激活失败：...」，不静默继续。
+async fn preflight_ancestors(http: reqwest::Client, chain: &[ServerProfile]) -> Result<(), String> {
+    for (index, prefix) in ancestor_prefixes(chain).into_iter().enumerate() {
+        let hop_name = prefix
+            .last()
+            .map(|hop| hop.name.trim().to_string())
+            .unwrap_or_default();
+        let label = if hop_name.is_empty() {
+            format!("第 {} 跳", index + 1)
+        } else {
+            format!("第 {} 跳 {}", index + 1, hop_name)
+        };
+        let api = Api::from_chain(http.clone(), prefix);
+        api.verify_connection()
+            .await
+            .map_err(|error| format!("转发链{label}验证失败：{error}"))?;
+        api.activate()
+            .await
+            .map_err(|error| format!("转发链{label}激活失败：{error}"))?;
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -98,7 +152,8 @@ pub async fn save_server(
     Ok(view)
 }
 
-/// 删除一台服务器（至少保留一台）；删除当前服务器后自动切换。
+/// 删除一台服务器及其所有转发目标（级联）：清理整棵子树的本地配置与续传状态；
+/// 允许删到空配置（返回的 `activeServer` 为 null）。
 #[tauri::command]
 pub async fn delete_server(state: State<'_, AppState>, id: String) -> Result<ConfigView, String> {
     let mut config = state
@@ -107,12 +162,16 @@ pub async fn delete_server(state: State<'_, AppState>, id: String) -> Result<Con
         .map_err(|_| "配置状态异常，请重启客户端".to_string())?
         .clone();
 
-    config.delete_server(&id)?;
+    let deleted = config.delete_server(&id)?;
     config::persist(&state.config_path, &config)?;
 
-    // 顺手清理该服务器遗留的断点续传状态。
+    // 清理所有被删服务器（含子树）遗留的断点续传状态。
     if let Ok(mut store) = uploads::UploadStore::load(&state.upload_state_path) {
-        if store.remove_by_server_id(&id) > 0 {
+        let mut changed = false;
+        for server_id in &deleted {
+            changed |= store.remove_by_server_id(server_id) > 0;
+        }
+        if changed {
             let _ = store.save();
         }
     }
@@ -123,6 +182,139 @@ pub async fn delete_server(state: State<'_, AppState>, id: String) -> Result<Con
         .lock()
         .map_err(|_| "配置状态异常，请重启客户端".to_string())? = config;
     Ok(view)
+}
+
+/// 新建 / 编辑一个「转发目标」（relay）：保存到 `parentId` 下并落盘。
+///
+/// - 不传 `id`：新建（生成独立 id 与 deviceId），自动设为 active；
+/// - 传 `id`：编辑，保留原 id 与 deviceId；
+/// - `app_secret` 为空/`null` 表示保留已保存的 secret（新建时必填）。
+#[tauri::command]
+pub async fn save_relay(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    parent_id: String,
+    name: String,
+    server_url: String,
+    device_name: String,
+    app_key: String,
+    app_secret: Option<String>,
+) -> Result<ConfigView, String> {
+    // 空白 secret 视为「保留原值」；新建时仍必须提供。
+    let secret_for_validation = app_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    config::validate_required_credentials(
+        id.as_deref(),
+        Some(app_key.as_str()),
+        secret_for_validation,
+    )?;
+
+    let mut config = state
+        .config
+        .lock()
+        .map_err(|_| "配置状态异常，请重启客户端".to_string())?
+        .clone();
+
+    config.save_relay(
+        id.as_deref(),
+        &parent_id,
+        &name,
+        &server_url,
+        &device_name,
+        &app_key,
+        app_secret.as_deref(),
+    )?;
+    config::persist(&state.config_path, &config)?;
+
+    let view = config.view();
+    *state
+        .config
+        .lock()
+        .map_err(|_| "配置状态异常，请重启客户端".to_string())? = config;
+    Ok(view)
+}
+
+/// 转发目标保存前的预览验证：按 `parentId` 解析父链 + 表单里的目标临时拼成链，
+/// 先逐跳验证并激活 parent 链上的祖先（设计 4.9），再验证整条链可达且 target 的
+/// key/secret 正确；**不落盘，也不激活/写入最终 target**。
+///
+/// - `existing_id` 为编辑时已保存的 relay id（沿用其 deviceId/secret）；
+/// - 新建使用临时 deviceId / 表单 secret，不激活目标。
+#[tauri::command]
+pub async fn verify_relay_preview(
+    state: State<'_, AppState>,
+    parent_id: String,
+    existing_id: Option<String>,
+    name: String,
+    server_url: String,
+    device_name: String,
+    app_key: String,
+    app_secret: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let config = state
+        .config
+        .lock()
+        .map_err(|_| "配置状态异常，请重启客户端".to_string())?
+        .clone();
+    let parent = config
+        .find(&parent_id)
+        .ok_or_else(|| "上级服务器不存在".to_string())?;
+    let mut chain = config
+        .resolve_chain(&parent.id)?
+        .into_iter()
+        .cloned()
+        .collect::<Vec<ServerProfile>>();
+
+    let mut relay = if let Some(existing_id) = existing_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        config
+            .find(existing_id)
+            .cloned()
+            .ok_or_else(|| "转发目标不存在".to_string())?
+    } else {
+        ServerProfile::new_relay(
+            &name,
+            &server_url,
+            &device_name,
+            &app_key,
+            app_secret.as_deref().unwrap_or_default(),
+            &parent.id,
+        )
+    };
+    let server_url = config::normalize_server_url(&server_url)?;
+    if server_url.is_empty() {
+        return Err("服务器地址不能为空".to_string());
+    }
+    relay.name = config::normalize_server_name(&name)?;
+    relay.server_url = server_url;
+    relay.device_name = config::normalize_device_name(&device_name)?;
+    relay.app_key = app_key.trim().to_string();
+    if let Some(secret) = app_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        relay.app_secret = secret.to_string();
+    }
+    if relay.app_key.is_empty() {
+        return Err("转发目标 AppKey 必填".to_string());
+    }
+    if relay.app_secret.trim().is_empty() {
+        return Err("转发目标 AppSecret 必填".to_string());
+    }
+    chain.push(relay);
+
+    // 设计 4.9：先按前缀逐跳验证并激活 parent 链上的所有祖先（不含临时 target），
+    // 再验证临时 target；全程只在内存中构造链，不读取/写入已保存配置。
+    preflight_ancestors(state.http.clone(), &chain).await?;
+    Api::from_chain(state.http.clone(), chain)
+        .verify_connection()
+        .await
 }
 
 /// 切换当前服务器。
@@ -183,9 +375,16 @@ pub fn file_info(path: String) -> Result<LocalFileInfo, String> {
 // ============================================================================
 
 /// 验证连接（契约 3.2）。
+///
+/// relay 目标（链长 > 1）先按前缀逐跳验证并激活所有祖先，再验证最终 target；
+/// 直连（链长 ≤ 1）不触发任何 preflight，行为与旧版一致。
 #[tauri::command]
 pub async fn verify_connection(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    api_from(&state)?.verify_connection().await
+    let chain = active_chain(&state)?;
+    preflight_ancestors(state.http.clone(), &chain).await?;
+    Api::from_chain(state.http.clone(), chain)
+        .verify_connection()
+        .await
 }
 
 /// 添加服务器前的预览验证（契约 3.2）：直接用表单里的地址与凭据验证连接，
@@ -513,7 +712,26 @@ pub async fn rename_server_file(
 
 #[cfg(test)]
 mod tests {
-    use super::preview_profile;
+    use super::{ancestor_prefixes, preview_profile};
+    use crate::config::ServerProfile;
+
+    /// 构造一条 `A(direct) → B → C …` 的测试链（纯内存，不发网络请求）。
+    fn chain_fixture(len: usize) -> Vec<ServerProfile> {
+        assert!(len >= 1);
+        let mut chain = vec![ServerProfile::new("A", "http://a", "dev")];
+        for index in 1..len {
+            let parent_id = chain.last().unwrap().id.clone();
+            chain.push(ServerProfile::new_relay(
+                &format!("hop{index}"),
+                &format!("http://hop{index}"),
+                "dev",
+                &format!("key{index}"),
+                &format!("secret{index}"),
+                &parent_id,
+            ));
+        }
+        chain
+    }
 
     #[test]
     fn preview_profile_normalizes_url_and_trims_credentials() {
@@ -541,5 +759,53 @@ mod tests {
     fn preview_profile_rejects_empty_or_invalid_url() {
         assert!(preview_profile("   ", None, None).is_err());
         assert!(preview_profile("ftp://127.0.0.1:8080", None, None).is_err());
+    }
+
+    /// 空链 / 单跳 direct 不触发 preflight（不多余 activate）。
+    #[test]
+    fn ancestor_prefixes_skip_direct_and_empty_chain() {
+        assert!(ancestor_prefixes(&[]).is_empty());
+        assert!(ancestor_prefixes(&chain_fixture(1)).is_empty());
+    }
+
+    /// prefix 顺序：root → target 的上一跳，按 1 步递增。
+    #[test]
+    fn ancestor_prefixes_are_root_to_parent_in_order() {
+        for len in 2..=4 {
+            let chain = chain_fixture(len);
+            let prefixes = ancestor_prefixes(&chain);
+            assert_eq!(
+                prefixes.len(),
+                len - 1,
+                "链长 {len} 应有 {} 个前缀",
+                len - 1
+            );
+            for (index, prefix) in prefixes.iter().enumerate() {
+                assert_eq!(prefix.len(), index + 1, "前缀应按 1 步递增");
+                assert_eq!(prefix[0].id, chain[0].id, "每个前缀都从 root 开始");
+                assert_eq!(
+                    prefix.last().unwrap().id,
+                    chain[index].id,
+                    "第 {index} 个前缀的末跳是链上第 {index} 跳"
+                );
+                assert_eq!(prefix.last().unwrap().kind, chain[index].kind);
+            }
+        }
+    }
+
+    /// 最终 target 不能被放进 preflight（否则会在 verify_connection 里被 activate）。
+    #[test]
+    fn ancestor_prefixes_never_include_target() {
+        let chain = chain_fixture(3);
+        let target = chain.last().unwrap();
+        let prefixes = ancestor_prefixes(&chain);
+        assert!(
+            prefixes
+                .iter()
+                .all(|prefix| prefix.iter().all(|hop| hop.id != target.id)),
+            "preflight 不能包含最终 target"
+        );
+        // 单跳链（只有 root）也返回空，不做多余 activate。
+        assert!(ancestor_prefixes(&chain[..1]).is_empty());
     }
 }

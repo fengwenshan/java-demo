@@ -104,9 +104,12 @@ public class SignatureFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
-        String path = request.getRequestURI();
+        // 签名仍按「实际收到的路径」计算（relay 请求是 /api/relay + 原始路径）；
+        // 设备绑定/限流成本/activate 顺序等业务判断使用剥离 /api/relay 后的有效路径。
+        String rawPath = request.getRequestURI();
+        String path = effectivePath(rawPath);
         String method = request.getMethod();
-        if (shouldSkip(path, method)) {
+        if (shouldSkip(rawPath, method)) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -122,7 +125,7 @@ public class SignatureFilter extends OncePerRequestFilter {
         boolean success = false;
         String error = null;
         try {
-            requestToUse = authenticate(request, path, method);
+            requestToUse = authenticate(request, rawPath, method);
             clientName = (String) requestToUse.getAttribute(ATTR_CLIENT_NAME);
             filterChain.doFilter(requestToUse, response);
             httpStatus = response.getStatus();
@@ -173,6 +176,8 @@ public class SignatureFilter extends OncePerRequestFilter {
 
     /** 按契约 2.6 顺序校验，通过后返回供下游使用的请求（JSON 请求为缓存 body 的 wrapper）。 */
     private HttpServletRequest authenticate(HttpServletRequest request, String path, String method) {
+        // 业务路径（剥离 relay 前缀），用于设备绑定/限流成本/调用顺序判断；签名仍用 path。
+        String businessPath = effectivePath(path);
         // 1. 必需请求头
         String appKey = request.getHeader(HEADER_APP_KEY);
         String timestamp = request.getHeader(HEADER_TIMESTAMP);
@@ -243,16 +248,16 @@ public class SignatureFilter extends OncePerRequestFilter {
             throw new RejectedException(ErrorCode.REQUEST_REPLAYED);
         }
 
-        // 6. 设备绑定（仅文件类接口）
+        // 6. 设备绑定（仅文件类接口；relay 请求按剥离前缀后的业务路径判断）
         String deviceId = request.getHeader(HEADER_DEVICE_ID);
-        if (properties.getSecurity().isDeviceBindingEnabled() && isFileApi(path)
+        if (properties.getSecurity().isDeviceBindingEnabled() && isFileApi(businessPath)
                 && !authService.isDeviceAllowed(appKey, deviceId)) {
             throw new RejectedException(ErrorCode.DEVICE_UNAUTHORIZED);
         }
 
         // 7. 令牌桶限流（appKey + IP，上传/初始化/完成/zip 解压/拷贝移动/终端执行消耗更多令牌）
-        int cost = (isUploadCost(path, method) || isExtractCost(path, method)
-                || isCopyOrMoveCost(path, method) || isTerminalCost(path, method))
+        int cost = (isUploadCost(businessPath, method) || isExtractCost(businessPath, method)
+                || isCopyOrMoveCost(businessPath, method) || isTerminalCost(businessPath, method))
                 ? properties.getSecurity().getRateLimit().getUploadCost()
                 : 1;
         if (!rateLimitService.tryConsume(appKey + "|" + clientIp(request), cost)) {
@@ -260,7 +265,7 @@ public class SignatureFilter extends OncePerRequestFilter {
         }
 
         // 8. 调用顺序：activate 前必须有同 MAC+IP 的近期 verify（仅身份强制开启时生效）
-        if (ACTIVATE_PATH.equals(path)) {
+        if (ACTIVATE_PATH.equals(businessPath)) {
             clientGuardService.requireVerifiedBeforeActivate(
                     clientIpOf(request), clientMacOf(request), appKey, deviceId);
         }
@@ -326,6 +331,14 @@ public class SignatureFilter extends OncePerRequestFilter {
             return value;
         }
         return ClientGuardService.normalizeMac(request.getHeader(ClientGuardService.HEADER_DEVICE_MAC));
+    }
+
+    /** relay 请求的业务有效路径：/api/relay/api/... → /api/...（其他路径原样返回）。 */
+    private static String effectivePath(String path) {
+        if (path != null && path.startsWith("/api/relay/api/")) {
+            return path.substring("/api/relay".length());
+        }
+        return path;
     }
 
     private static boolean isFileApi(String path) {

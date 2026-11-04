@@ -21,6 +21,13 @@ public enum ErrorCode {
     CLIENT_IDENTITY_MISSING(40312, 403, "缺少设备标识"),
     CALL_ORDER_VIOLATION(40313, 403, "接口调用顺序错误"),
     NOT_FOUND(40400, 404, "资源不存在"),
+    RELAY_CHAIN_INVALID(40010, 400, "转发链无效"),
+    RELAY_DISABLED(40320, 403, "转发功能未开启"),
+    RELAY_TARGET_UNAUTHORIZED(40110, 401, "转发目标鉴权失败"),
+    RELAY_TARGET_UNREACHABLE(50210, 502, "转发目标不可达"),
+    RELAY_TARGET_BAD_RESPONSE(50211, 502, "转发目标返回异常"),
+    RELAY_TARGET_IDENTITY_REJECTED(50212, 502, "转发目标拒绝来源身份"),
+    RELAY_TIMEOUT(50410, 504, "转发目标超时"),
     RATE_LIMITED(42900, 429, "请求过于频繁"),
     INTERNAL_ERROR(50000, 500, "服务器内部错误");
 

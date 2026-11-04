@@ -324,6 +324,35 @@ UPLOAD_APP_SECRET=请替换为随机长密钥
 
 先把 GitHub Actions 下载的 `ScopeFTP-server-*.jar` 放到 `server/target/`，或设置 `JAR_PATH` 指向该文件；脚本会 rsync 到服务器、生成 600 权限环境文件、重启 systemd 并做健康检查，不再本地打包。
 
+### 2.6 多级转发（relay）部署
+
+relay 默认关闭。只要某台服务端要作为**中转节点**（A 或中间 B/C），就必须升级到本版本并在其环境文件/启动参数里显式开启：
+
+```yaml
+app:
+  relay:
+    enabled: true
+    max-hops: 16
+    max-chain-header-bytes: 16384
+    max-via-header-bytes: 8192
+    connect-timeout-ms: 3000
+    request-timeout-ms: 20000
+    upload-timeout-ms: 180000
+    allow-private-network: true   # 内网 B/C 通常需要；公网 A→公网 B 可关
+    allow-loopback: false         # 生产不要开
+    allowed-hosts: []             # 可选：["b.internal","10.0.0.5:8080"]
+```
+
+部署拓扑建议：
+
+- 客户端只直连 A；B/C 只允许 A（或上一跳）访问，不要在客户端配置里直连 B/C，也不要把 B/C 暴露给公网。
+- A/B 作为中转节点必须 `app.relay.enabled=true`；最终目标 C 的数据接口可以仍是旧版（A/B 会按正常 path 转发），但 C 要记录来源链/`relayVia` 需要升级本版本。
+- 旧客户端读到 v3 config 可能把 relay 当 direct 直连 B/C，从而绕过 A；发布窗口内限制 B/C 可达性、轮换 B/C 凭据，或强制升级客户端。
+- `allowed-hosts` 非空时只允许列出的 host（或 `host:port`）；默认拒绝 loopback/link-local/云元数据地址，`allow-private-network` 默认 true（内网转发需要）。
+- 反向代理子路径：`serverUrl` 可带子路径（如 `https://example.com/scopeftp`），relay 转发会保留该子路径后再追加 `/api/relay` / 原 path。
+
+审计：中转节点会记录 `relay.*` action 与 `relayVia` 来源链（JSONL + SQLite `relay_via` 列）；旧审计库启动时自动 `ALTER TABLE` 补列，无需手工迁移。
+
 ## 3. 方式 C：本地开发运行
 
 ```bash
@@ -433,7 +462,7 @@ macOS 上 Java 监听 IPv6 `*:9090` 时，另一个前端项目的 Vite 可能�
 
 - **备份**：定期备份所有存储根目录（用户文件 + 隐藏的 `.upload-meta/metadata.sqlite3`）与当前环境审计目录（环境文件里的 `app.audit.dir`，JSONL + `audit.sqlite3`）。SQLite 运行中直接 `cp` 可能丢 WAL，建议 `sqlite3 metadata.sqlite3 ".backup backup.sqlite3"`（审计库同理），或停服后整目录备份。
 - **磁盘**：上传文件不自动清理，建议加 cron 清理或接入对象存储（后续可替换 `FileStorageService`）。
-- **日志**：stdout + 环境文件 `logging.file.name` 指定的文件；操作审计默认开启，JSONL 与 `audit.sqlite3` 都在 `app.audit.dir`，记录客户端全部 `/api/**` 操作（含失败），JSONL 按天、默认保留 90 天，SQLite 同步清理；字段含 requestId/action/path/参数/耗时/状态，敏感字段脱敏；客户端日志抽屉把操作与连接日志合并展示，可按类型/操作/时间筛选。
+- **日志**：stdout + 环境文件 `logging.file.name` 指定的文件；操作审计默认开启，JSONL 与 `audit.sqlite3` 都在 `app.audit.dir`，记录客户端全部 `/api/**` 操作（含失败），JSONL 按天、默认保留 90 天，SQLite 同步清理；字段含 requestId/action/path/参数/耗时/状态、`relayVia` 来源链，敏感字段脱敏；客户端日志抽屉把操作与连接日志合并展示，可按类型/操作/时间筛选。
 - **密钥轮换**：修改启动参数里的 `--app-secret`（Docker 改 `.env`）后重启服务，同时更新客户端「设置」里的 AppSecret；旧密钥立即失效。
 - **JDK**：服务器有多个 Java 版本时，在 `scop-ftp.env` 里用 `JAVA_HOME=/opt/jdk-21` 指定；分环境包 `start.sh` 会校验该路径和版本（必须 21+），日志里启动成功的标志是 `Tomcat started on port ...`。`JAVA_HOME` 留空或没有这一行时，`start.sh` 会使用启动前 shell 的 `JAVA_HOME`，没有则用 `PATH` 里的 `java`。
 - **端口**：仅暴露 Nginx 的 443；服务端口（dev 9090 / docker、xiaoshan 8080 / xihu 8787）不要直接暴露公网（云安全组限制内网）。

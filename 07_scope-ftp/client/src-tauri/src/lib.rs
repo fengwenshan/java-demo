@@ -2,8 +2,8 @@
 //!
 //! 所有网络请求、HMAC 签名、文件读写均在 Rust 侧完成，WebView 拿不到 `appSecret`；
 //! AppKey / AppSecret 默认使用编译期内置值（见 [`builtin`]）；每台服务器可选自定义，自定义 secret 只保存在本地配置（0600），不返回 WebView。
-//! 本地配置支持多台服务器（v2，见 [`config`]），大文件上传支持分片与断点续传
-//! （见 [`uploads`]）。
+//! 本地配置支持多台服务器（v3 树形转发链，见 [`config`]），请求按链逐跳签名
+//! （见 [`api`]），大文件上传支持分片与断点续传（见 [`uploads`]）。
 
 mod api;
 mod builtin;
@@ -43,11 +43,10 @@ pub fn run() {
                 .unwrap_or_else(|| PathBuf::from(uploads::UPLOAD_STATE_FILE_NAME));
             // 配置目录不可写时（例如受限沙箱）不阻断启动：本次会话使用内存配置，
             // 保存配置时会返回明确错误提示。
-            let app_config = config::load_or_init(&config_path)
-                .unwrap_or_else(|error| {
-                    eprintln!("加载配置失败，使用内存默认配置：{error}");
-                    config::default_config()
-                });
+            let app_config = config::load_or_init(&config_path).unwrap_or_else(|error| {
+                eprintln!("加载配置失败，使用内存默认配置：{error}");
+                config::default_config()
+            });
             // 启动时清理超过 24h 的断点续传记录。
             if let Ok(mut store) = uploads::UploadStore::load(&upload_state_path) {
                 if store.cleanup_stale(api::now_millis()) > 0 {
@@ -71,11 +70,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_server,
+            commands::save_relay,
             commands::delete_server,
             commands::set_active_server,
             commands::file_info,
             commands::verify_connection,
             commands::verify_connection_preview,
+            commands::verify_relay_preview,
             commands::activate,
             commands::list_storage_roots,
             commands::upload_file,

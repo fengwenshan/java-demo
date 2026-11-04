@@ -301,6 +301,41 @@ body {
   padding: 6px 2px;
 }
 
+/* ---------- 转发树（A → B → C 按层级缩进） ---------- */
+.server-tree-node {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.server-list-item-relay {
+  background: rgba(22, 119, 255, 0.03);
+}
+
+.server-list-item-relay.server-list-item-active {
+  background: #e6f4ff;
+}
+
+.server-relay-tag {
+  flex: none;
+  margin-inline-end: 0;
+  padding-inline: 5px;
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.server-list-add-relay {
+  flex: none;
+  opacity: 0.45;
+  transition: opacity 0.15s ease;
+}
+
+.server-list-item:hover .server-list-add-relay,
+.server-list-item-active .server-list-add-relay,
+.server-list-add-relay:focus-visible {
+  opacity: 1;
+}
+
 .server-card .ant-card-body {
   padding: 12px 14px;
 }
@@ -374,6 +409,20 @@ body {
 
 .browser-card .ant-card-body {
   min-width: 0;
+}
+
+/* 当前目标名称 + 转发链说明（B（经 A 转发）） */
+.browser-server-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.browser-server-relay {
+  font-size: 12px;
 }
 
 /* 目录页首行：面包屑 + 刷新（紧跟路径）……行尾 查找/上传 */
@@ -880,6 +929,14 @@ body {
   margin-bottom: 16px;
 }
 
+/* 空配置（还没有服务器） */
+.empty-config {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+}
+
 /* ---------- 行右键菜单（task-19） ---------- */
 
 .row-context-menu {
@@ -1168,6 +1225,101 @@ body {
 
 .settings-root-hint {
   font-size: 11px;
+}
+
+/* 转发目标卡片 / 列表 / 可点击转发链 */
+.settings-relay-card {
+  grid-column: 1 / -1;
+}
+
+.settings-relay-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.settings-relay-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  transition: background-color 0.15s ease;
+}
+
+.settings-relay-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.settings-relay-item:focus-visible {
+  outline: 2px solid #1677ff;
+  outline-offset: 1px;
+}
+
+.settings-relay-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.settings-relay-name,
+.settings-relay-url {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-relay-name {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.settings-relay-url {
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.settings-relay-hint {
+  flex: none;
+  font-size: 11px;
+}
+
+.settings-relay-empty {
+  font-size: 12px;
+}
+
+.settings-relay-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.settings-relay-note {
+  overflow-wrap: anywhere;
+}
+
+.settings-chain {
+  row-gap: 0;
+}
+
+.settings-chain-hop.ant-btn {
+  height: auto;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.settings-chain-arrow {
+  font-size: 12px;
 }
 
 /* 窄屏：设置页自动单列（<1000px），侧边栏收窄。 */

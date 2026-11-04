@@ -20,18 +20,24 @@ import {
   FolderOutlined,
   GlobalOutlined,
   KeyOutlined,
+  NodeIndexOutlined,
+  PlusOutlined,
   SafetyCertificateOutlined,
+  SaveOutlined,
 } from "@ant-design/icons";
 
 import {
   activateDevice,
   deleteServer,
   errorMessage,
+  saveRelay,
   saveServer,
   verifyConnection,
   verifyConnectionPreview,
+  verifyRelayPreview,
 } from "../api";
 import type {
+  ChainHop,
   ConfigView,
   ConnectionState,
   ServerView,
@@ -68,18 +74,28 @@ function isFormValidationError(error: unknown): boolean {
   );
 }
 
+/** 普通 HTTP（非本机）时提示生产建议 HTTPS。 */
+function warnPlainHttp(url: string, message: { warning: (text: string) => void }) {
+  const isPlainHttp = /^http:\/\//i.test(url);
+  const isLocal =
+    /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/.*)?$/i.test(url);
+  if (isPlainHttp && !isLocal) {
+    message.warning("生产环境建议使用 HTTPS，当前为明文 HTTP 连接");
+  }
+}
+
 export interface SettingsPageProps {
   config: ConfigView | null;
-  /** 当前编辑的服务器；`null` 表示新建。 */
+  /** 当前编辑的服务器；`null` 表示新建（direct 或 relay）。 */
   server: ServerView | null;
   isNew: boolean;
+  /** 新建转发目标时的父服务器；其它情况为 null。 */
+  relayParent: ServerView | null;
   verify: VerifyResult | null;
   connection: ConnectionState;
   browserMode: boolean;
   /** 当前服务器的存储根（task-16，只读展示）。 */
   roots: StorageRoot[];
-  /** 当前服务器数量 > 1 时才允许删除。 */
-  canDelete: boolean;
   onSaved: (
     config: ConfigView,
     meta: { isNew: boolean },
@@ -89,25 +105,32 @@ export interface SettingsPageProps {
   onRecheck: () => void | Promise<void>;
   /** 把“是否有未保存修改”同步给外层，用于离开设置页时提醒。 */
   onDirtyChange: (dirty: boolean) => void;
+  /** 在当前服务器下新建转发目标。 */
+  onAddRelay: (parentId: string) => void;
+  /** 切换 active 服务器（链 / 转发目标列表点击）。 */
+  onSelectServer: (id: string) => void;
 }
 
 export default function SettingsPage({
   config,
   server,
   isNew,
+  relayParent,
   verify,
   connection,
   browserMode,
   roots,
-  canDelete,
   onSaved,
   onDeleted,
   onVerified,
   onRecheck,
   onDirtyChange,
+  onAddRelay,
+  onSelectServer,
 }: SettingsPageProps) {
   const { message } = AntdApp.useApp();
   const [form] = Form.useForm<SettingsFormValues>();
+  const formName = Form.useWatch("name", form) as string | undefined;
   const [saving, setSaving] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -115,24 +138,98 @@ export default function SettingsPage({
 
   const activeServer = useMemo(
     () =>
-      config?.servers.find((item) => item.id === config.activeServerId) ?? null,
+      config?.activeServer ??
+      config?.servers.find((item) => item.id === config.activeServerId) ??
+      null,
     [config],
   );
+
+  /** 新建转发目标（挂在 relayParent 下）。 */
+  const isRelayNew = isNew && relayParent !== null;
+  /** 当前表单是不是转发目标（新建或编辑 relay）。 */
+  const isRelay = isRelayNew || (!isNew && server?.kind === "relay");
   /** 验证连接（成功后会保存配置并激活设备）只能作用于当前服务器。 */
   const isActiveServer = !isNew && Boolean(server && server.id === activeServer?.id);
-  /** 添加页可直接验证（成功后才添加）；编辑页只能验证当前服务器。 */
-  const verifyDisabled = browserMode || (!isNew && !isActiveServer);
+  /** 新建 relay 时父链必须是 active 且已连接（R1）。 */
+  const relayParentReady = Boolean(
+    relayParent &&
+      relayParent.id === activeServer?.id &&
+      connection.status === "connected",
+  );
+  /** 添加转发目标：父服务器必须是 active 且已连接。 */
+  const canAddRelay = Boolean(
+    server && isActiveServer && connection.status === "connected" && !browserMode,
+  );
+  const addRelayDisabledReason = browserMode
+    ? "浏览器预览环境不可用"
+    : !isActiveServer
+      ? `请先在左侧切换到「${server?.name ?? "该服务器"}」`
+      : connection.status !== "connected"
+        ? `请先连接「${server?.name ?? "该服务器"}」，连接成功后才能添加转发目标`
+        : "";
+
+  const parentName = isRelayNew
+    ? (relayParent?.name ?? "")
+    : (server?.parentName ?? "");
+  const chainHops: ChainHop[] = server?.chainHops ?? [];
+  const chainLabel = isRelayNew
+    ? [...(relayParent?.chainPath ?? []), "新转发目标"].join(" → ")
+    : chainHops.length > 0
+      ? chainHops.map((hop) => hop.name).join(" → ")
+      : (server?.chainPath ?? []).join(" → ");
+
+  const verifyDisabled =
+    browserMode ||
+    (isRelayNew ? !relayParentReady : !isNew && !isActiveServer);
+
   const initialValues = useMemo<SettingsFormValues>(
     () => ({
       name: server?.name ?? "",
-      serverUrl: server?.serverUrl ?? activeServer?.serverUrl ?? FALLBACK_SERVER_URL,
-      deviceName:
-        server?.deviceName ?? activeServer?.deviceName ?? FALLBACK_DEVICE_NAME,
-      appKey: server?.appKey ?? "",
-      appSecret: server?.hasCustomSecret ? SAVED_SECRET_MASK : "",
+      // 新建转发目标时不要预填上级服务器的地址/凭据。
+      serverUrl: relayParent
+        ? ""
+        : (server?.serverUrl ?? activeServer?.serverUrl ?? FALLBACK_SERVER_URL),
+      deviceName: relayParent
+        ? FALLBACK_DEVICE_NAME
+        : (server?.deviceName ??
+          activeServer?.deviceName ??
+          FALLBACK_DEVICE_NAME),
+      appKey: relayParent ? "" : (server?.appKey ?? ""),
+      appSecret: relayParent
+        ? ""
+        : (server?.hasCustomSecret ? SAVED_SECRET_MASK : ""),
     }),
-    [activeServer?.deviceName, activeServer?.serverUrl, server],
+    [activeServer?.deviceName, activeServer?.serverUrl, relayParent, server],
   );
+
+  /** 直接子转发目标（A 下 B/C…，B 下 C…）。 */
+  const children = useMemo(
+    () =>
+      server
+        ? (config?.servers ?? []).filter((item) => item.parentId === server.id)
+        : [],
+    [config?.servers, server],
+  );
+
+  /** 删除时会被级联删除的整棵子树数量。 */
+  const subtreeCount = useMemo(() => {
+    if (!server) return 0;
+    const all = config?.servers ?? [];
+    let count = 0;
+    const walk = (id: string) => {
+      for (const item of all) {
+        if (item.parentId === id) {
+          count += 1;
+          walk(item.id);
+        }
+      }
+    };
+    walk(server.id);
+    return count;
+  }, [config?.servers, server]);
+
+  const remainingAfterDelete =
+    (config?.servers.length ?? 0) - 1 - subtreeCount;
 
   /** 表单当前值是否与已保存配置不同。 */
   const computeDirty = useCallback(() => {
@@ -171,6 +268,38 @@ export default function SettingsPage({
 
       setSaving(true);
       try {
+        if (isRelay) {
+          // 编辑已保存的转发目标（新建走「验证并添加」）：secret 留空/掩码表示保留。
+          const secret =
+            isRelayNew
+              ? values.appSecret
+              : !values.appSecret.trim() || values.appSecret === SAVED_SECRET_MASK
+                ? null
+                : values.appSecret;
+          const saved = await saveRelay({
+            id: isRelayNew ? null : (server?.id ?? null),
+            parentId: isRelayNew
+              ? (relayParent?.id ?? "")
+              : (server?.parentId ?? ""),
+            name: values.name,
+            serverUrl: values.serverUrl,
+            deviceName: values.deviceName,
+            appKey: values.appKey,
+            appSecret: secret,
+          });
+          setDirty(false);
+          if (!silent) {
+            message.success(
+              isRelayNew
+                ? "转发目标已添加"
+                : "转发目标配置已保存，需重新验证连接",
+            );
+            warnPlainHttp(values.serverUrl, message);
+          }
+          await onSaved(saved, { isNew: isRelayNew });
+          return true;
+        }
+
         const saved = await saveServer({
           id: isNew ? null : (server?.id ?? null),
           name: values.name,
@@ -182,18 +311,12 @@ export default function SettingsPage({
         });
         setDirty(false);
         if (!silent) {
-          message.success(isNew ? "服务器已添加并切换为当前服务器" : "服务器配置已保存");
+          message.success(
+            isNew ? "服务器已添加并切换为当前服务器" : "服务器配置已保存",
+          );
+          warnPlainHttp(values.serverUrl, message);
         }
         await onSaved(saved, { isNew });
-
-        const isPlainHttp = /^http:\/\//i.test(saved.servers.find((item) => item.id === (isNew ? saved.activeServerId : server?.id))?.serverUrl ?? "");
-        const isLocal =
-          /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/.*)?$/i.test(
-            saved.servers.find((item) => item.id === (isNew ? saved.activeServerId : server?.id))?.serverUrl ?? "",
-          );
-        if (isPlainHttp && !isLocal) {
-          message.warning("生产环境建议使用 HTTPS，当前为明文 HTTP 连接");
-        }
         return true;
       } catch (error) {
         message.error(errorMessage(error));
@@ -202,10 +325,84 @@ export default function SettingsPage({
         setSaving(false);
       }
     },
-    [form, isNew, message, onSaved, server?.id],
+    [
+      form,
+      isNew,
+      isRelay,
+      isRelayNew,
+      message,
+      onSaved,
+      relayParent?.id,
+      server?.id,
+      server?.parentId,
+    ],
   );
 
   const handleVerify = useCallback(async () => {
+    // 新建转发目标：整链预览验证 → 保存 → 回到父服务器页面。
+    if (isRelayNew) {
+      if (!relayParent) {
+        message.warning("上级服务器不存在，请重新选择");
+        return;
+      }
+      if (!relayParentReady) {
+        message.warning(
+          `请先连接「${relayParent.name}」，连接成功后才能添加转发目标`,
+        );
+        return;
+      }
+      let values: SettingsFormValues;
+      try {
+        values = await form.validateFields();
+      } catch (error) {
+        if (!isFormValidationError(error)) {
+          message.error(errorMessage(error));
+        }
+        return;
+      }
+      setVerifying(true);
+      try {
+        const verifyData = await verifyRelayPreview({
+          parentId: relayParent.id,
+          existingId: null,
+          name: values.name,
+          serverUrl: values.serverUrl,
+          deviceName: values.deviceName,
+          appKey: values.appKey,
+          appSecret: values.appSecret || null,
+        });
+        onVerified(verifyData);
+        const next = await saveRelay({
+          id: null,
+          parentId: relayParent.id,
+          name: values.name,
+          serverUrl: values.serverUrl,
+          deviceName: values.deviceName,
+          appKey: values.appKey,
+          appSecret: values.appSecret,
+        });
+        setDirty(false);
+        message.success(`转发目标「${values.name}」已添加，当前服务器已切换`);
+        warnPlainHttp(values.serverUrl, message);
+        await onSaved(next, { isNew: true });
+        // 预览验证用的是临时 deviceId；保存后切换到了真实 deviceId，重新 verify 后
+        // 立即激活目标设备，避免用户点进目录时因未激活被 40300 拦住。
+        try {
+          await activateDevice();
+          message.success(`转发目标「${values.name}」设备已激活`);
+        } catch (error) {
+          message.warning(
+            `转发目标已添加，但设备激活失败：${errorMessage(error)}`,
+          );
+        }
+      } catch (error) {
+        message.error(errorMessage(error));
+      } finally {
+        setVerifying(false);
+      }
+      return;
+    }
+
     // 添加页：不落盘，先用表单里的地址/凭据做「预览验证」；成功后再自动添加服务器。
     if (isNew) {
       let values: SettingsFormValues;
@@ -275,14 +472,25 @@ export default function SettingsPage({
     } finally {
       setVerifying(false);
     }
-  }, [computeDirty, doSave, form, isNew, message, onRecheck, onVerified]);
+  }, [
+    computeDirty,
+    doSave,
+    form,
+    isNew,
+    isRelayNew,
+    message,
+    onRecheck,
+    onVerified,
+    relayParent,
+    relayParentReady,
+  ]);
 
   const handleDelete = useCallback(async () => {
     if (!server) return;
     setDeleting(true);
     try {
       const next = await deleteServer(server.id);
-      message.success(`已删除服务器「${server.name}」`);
+      message.success(`已删除「${server.name}」`);
       await onDeleted(next, server.id);
     } catch (error) {
       message.error(errorMessage(error));
@@ -291,28 +499,73 @@ export default function SettingsPage({
     }
   }, [message, onDeleted, server]);
 
+  const deleteDescription = (() => {
+    if (!server) return "";
+    const parts: string[] = [];
+    if (subtreeCount > 0) {
+      parts.push(
+        `会同时删除其下 ${subtreeCount} 个转发目标的本地配置和续传状态，不会删除服务器上的文件。`,
+      );
+    } else {
+      parts.push("会删除该服务器的本地配置与未完成的续传状态，不会删除服务端文件。");
+    }
+    if (remainingAfterDelete <= 0) {
+      parts.push("这是最后一台服务器，删除后进入空配置。");
+    }
+    return parts.join("");
+  })();
+
   const verifyHint = browserMode
     ? "浏览器预览环境不可用"
-    : isNew
-      ? "不用先添加：验证成功后会自动添加服务器并激活设备"
-      : isActiveServer
-        ? (dirty ? "会先保存修改，再验证连接并激活设备" : "")
-        : "只能验证当前服务器（验证成功才会保存修改），请先在左侧切换";
+    : isRelayNew
+      ? relayParentReady
+        ? "先通过整条链验证目标，验证成功后自动保存；之后在左侧选中它验证连接"
+        : `请先连接「${relayParent?.name ?? "上级服务器"}」，连接成功后才能添加转发目标`
+      : isNew
+        ? "不用先添加：验证成功后会自动添加服务器并激活设备"
+        : isActiveServer
+          ? dirty
+            ? "会先保存修改，再验证连接并激活设备"
+            : ""
+          : "只能验证当前服务器（验证成功才会保存修改），请先在左侧切换";
+
+  const relaySecretRules =
+    isRelay && !isRelayNew
+      ? [{ max: 256, message: "AppSecret 最多 256 个字符" }]
+      : [
+          { required: true, whitespace: true, message: "请输入 AppSecret" },
+          { max: 256, message: "AppSecret 最多 256 个字符" },
+        ];
+
   return (
     <div className="settings-grid" data-testid="settings-grid">
       <Card
         className="page-card settings-card"
         title={
           <Space>
-            <ApiOutlined style={{ color: "#1677ff" }} />
-            {isNew ? "添加服务器" : "服务器配置"}
+            {isRelay ? (
+              <NodeIndexOutlined style={{ color: "#1677ff" }} />
+            ) : (
+              <ApiOutlined style={{ color: "#1677ff" }} />
+            )}
+            {isRelayNew
+              ? "添加转发目标"
+              : isNew
+                ? "添加服务器"
+                : isRelay
+                  ? "转发目标配置"
+                  : "服务器配置"}
           </Space>
         }
         extra={
-          !isNew && canDelete ? (
+          !isNew && server ? (
             <Popconfirm
-              title="删除该服务器？"
-              description="会删除该服务器的本地配置与未完成的续传状态，不会删除服务端文件。"
+              title={
+                server.kind === "relay"
+                  ? `删除转发目标「${server.name}」？`
+                  : `删除服务器「${server.name}」？`
+              }
+              description={deleteDescription}
               okText="删除"
               cancelText="取消"
               okButtonProps={{ danger: true }}
@@ -327,16 +580,31 @@ export default function SettingsPage({
                 data-testid="delete-server"
                 disabled={browserMode}
               >
-                删除服务器
+                {server.kind === "relay" ? "删除转发目标" : "删除服务器"}
               </Button>
             </Popconfirm>
           ) : (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              至少保留 1 台服务器
+              {isRelayNew ? "挂在上级服务器下的转发目标" : "保存后自动切换为当前服务器"}
             </Text>
           )
         }
       >
+        {isRelay && (
+          <Alert
+            className="settings-relay-note"
+            type={isRelayNew && !relayParentReady ? "warning" : "info"}
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={
+              isRelayNew && !relayParentReady
+                ? `请先连接「${relayParent?.name ?? "上级服务器"}」，连接成功后才能添加转发目标`
+                : `上级服务器：${parentName || "-"}`
+            }
+            description={`转发链：${chainLabel || "-"}`}
+          />
+        )}
+
         <Form
           form={form}
           layout="vertical"
@@ -347,7 +615,7 @@ export default function SettingsPage({
           data-testid="settings-form"
         >
           <Form.Item
-            label="服务器名称"
+            label={isRelay ? "转发目标名称" : "服务器名称"}
             name="name"
             rules={[
               { required: true, message: "请输入服务器名称" },
@@ -356,14 +624,18 @@ export default function SettingsPage({
           >
             <Input
               prefix={<DesktopOutlined />}
-              placeholder="开发环境"
+              placeholder={isRelay ? "内网测试机 B" : "开发环境"}
               allowClear
               autoComplete="off"
               data-testid="server-name-input"
             />
           </Form.Item>
           <Form.Item
-            label="服务器地址"
+            label={
+              isRelay
+                ? `目标中转服务器地址（${parentName || "上级服务器"} 可访问）`
+                : "服务器地址"
+            }
             name="serverUrl"
             rules={[
               { required: true, message: "请输入服务器地址" },
@@ -375,16 +647,24 @@ export default function SettingsPage({
           >
             <Input
               prefix={<GlobalOutlined />}
-              placeholder="http://127.0.0.1:8080"
+              placeholder={
+                isRelay ? "http://10.0.0.5:8080" : "http://127.0.0.1:8080"
+              }
               allowClear
               autoComplete="off"
               data-testid="server-url-input"
             />
           </Form.Item>
           <Form.Item
-            label="AppKey"
+            label={
+              isRelay ? `${formName?.trim() || "目标"} 的 AppKey` : "AppKey"
+            }
             name="appKey"
-            tooltip="必填，必须与服务端启动时指定的 AppKey 一致"
+            tooltip={
+              isRelay
+                ? "目标中转服务器自己的 AppKey"
+                : "必填，必须与服务端启动时指定的 AppKey 一致"
+            }
             rules={[
               { required: true, whitespace: true, message: "请输入 AppKey" },
               { max: 128, message: "AppKey 最多 128 个字符" },
@@ -392,24 +672,37 @@ export default function SettingsPage({
           >
             <Input
               prefix={<KeyOutlined />}
-              placeholder="与服务端启动时的 AppKey 一致"
+              placeholder={
+                isRelay
+                  ? "目标服务器的 AppKey"
+                  : "与服务端启动时的 AppKey 一致"
+              }
               allowClear
               autoComplete="off"
               data-testid="server-app-key-input"
             />
           </Form.Item>
           <Form.Item
-            label="AppSecret"
+            label={
+              isRelay ? `${formName?.trim() || "目标"} 的 AppSecret` : "AppSecret"
+            }
             name="appSecret"
-            tooltip="必填，必须与服务端启动时指定的 AppSecret 一致"
-            rules={[
-              { required: true, whitespace: true, message: "请输入 AppSecret" },
-              { max: 256, message: "AppSecret 最多 256 个字符" },
-            ]}
+            tooltip={
+              isRelay
+                ? "目标中转服务器自己的 AppSecret；编辑时留空表示保留原值"
+                : "必填，必须与服务端启动时指定的 AppSecret 一致"
+            }
+            rules={relaySecretRules}
           >
             <Input.Password
               prefix={<SafetyCertificateOutlined />}
-              placeholder="与服务端启动时的 AppSecret 一致"
+              placeholder={
+                isRelay
+                  ? isRelayNew
+                    ? "目标服务器的 AppSecret"
+                    : "留空表示保留原值"
+                  : "与服务端启动时的 AppSecret 一致"
+              }
               allowClear
               autoComplete="new-password"
               onFocus={(event) => {
@@ -421,7 +714,7 @@ export default function SettingsPage({
             />
           </Form.Item>
           <Form.Item
-            label="设备名称"
+            label={isRelay ? "设备名称（目标服务器）" : "设备名称"}
             name="deviceName"
             rules={[
               { required: true, message: "请输入设备名称" },
@@ -446,10 +739,23 @@ export default function SettingsPage({
                   onClick={() => void handleVerify()}
                   data-testid="verify-connection"
                 >
-                  验证连接
+                  {isRelayNew ? "验证并添加" : "验证连接"}
                 </Button>
               </span>
             </Tooltip>
+            {!isNew && (
+              <Tooltip title="只保存配置，不验证连接">
+                <Button
+                  icon={<SaveOutlined />}
+                  loading={saving}
+                  disabled={browserMode || !dirty}
+                  onClick={() => void doSave(false)}
+                  data-testid="save-server"
+                >
+                  保存
+                </Button>
+              </Tooltip>
+            )}
           </Space>
         </Form>
       </Card>
@@ -475,6 +781,46 @@ export default function SettingsPage({
               {server?.name ?? "保存后显示"}
             </Text>
           </Descriptions.Item>
+          {isRelay && (
+            <Descriptions.Item label="上级服务器">
+              <Text ellipsis className="ellipsis-text value-wrap">
+                {parentName || "-"}
+              </Text>
+            </Descriptions.Item>
+          )}
+          {isRelay && (
+            <Descriptions.Item label="转发链">
+              {chainHops.length > 0 ? (
+                <Space
+                  wrap
+                  size={0}
+                  className="settings-chain"
+                  data-testid="settings-chain"
+                >
+                  {chainHops.map((hop, index) => (
+                    <span key={hop.id} className="settings-chain-hop-wrap">
+                      {index > 0 && (
+                        <Text type="secondary" className="settings-chain-arrow">
+                          {" → "}
+                        </Text>
+                      )}
+                      <Button
+                        type="link"
+                        size="small"
+                        className="settings-chain-hop"
+                        onClick={() => onSelectServer(hop.id)}
+                        data-testid="settings-chain-hop"
+                      >
+                        {hop.name}
+                      </Button>
+                    </span>
+                  ))}
+                </Space>
+              ) : (
+                <Text type="secondary">{chainLabel || "-"}</Text>
+              )}
+            </Descriptions.Item>
+          )}
           <Descriptions.Item label="服务器地址">
             <Tooltip title={server?.serverUrl}>
               <Text className="mono-text ellipsis-text value-wrap">
@@ -627,7 +973,6 @@ export default function SettingsPage({
           </Descriptions.Item>
         </Descriptions>
 
-
         {connection.status === "failed" && (
           <Alert
             style={{ marginTop: 16 }}
@@ -643,6 +988,83 @@ export default function SettingsPage({
           />
         )}
       </Card>
+
+      {server && (
+        <Card
+          className="page-card settings-card settings-relay-card"
+          title={
+            <Space>
+              <NodeIndexOutlined style={{ color: "#1677ff" }} />
+              转发目标（{children.length}）
+            </Space>
+          }
+          data-testid="settings-relays"
+        >
+          {children.length === 0 ? (
+            <Text type="secondary" className="settings-relay-empty">
+              还没有转发目标。
+            </Text>
+          ) : (
+            <div className="settings-relay-list">
+              {children.map((child) => (
+                <div
+                  key={child.id}
+                  role="button"
+                  tabIndex={0}
+                  className="settings-relay-item"
+                  data-testid="settings-relay-item"
+                  data-server-id={child.id}
+                  onClick={() => onSelectServer(child.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onSelectServer(child.id);
+                    }
+                  }}
+                >
+                  <Tag color="blue" className="server-relay-tag">
+                    转发
+                  </Tag>
+                  <div className="settings-relay-main">
+                    <Text strong ellipsis className="settings-relay-name">
+                      {child.name}
+                    </Text>
+                    <Text
+                      type="secondary"
+                      ellipsis
+                      className="mono-text settings-relay-url"
+                    >
+                      {child.serverUrl}
+                    </Text>
+                  </div>
+                  <Text type="secondary" className="settings-relay-hint">
+                    点击切换
+                  </Text>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="settings-relay-actions">
+            <Tooltip title={addRelayDisabledReason}>
+              <span className="tooltip-button-wrap">
+                <Button
+                  icon={<PlusOutlined />}
+                  disabled={!canAddRelay}
+                  onClick={() => onAddRelay(server.id)}
+                  data-testid="add-relay-button"
+                >
+                  添加转发目标
+                </Button>
+              </span>
+            </Tooltip>
+            {addRelayDisabledReason && (
+              <Text type="secondary" className="settings-relay-hint">
+                {addRelayDisabledReason}
+              </Text>
+            )}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }

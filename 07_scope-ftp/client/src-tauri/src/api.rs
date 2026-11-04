@@ -32,6 +32,10 @@ const HEADER_SIGNATURE: &str = "X-Signature";
 const HEADER_DEVICE_ID: &str = "X-Device-Id";
 const HEADER_DEVICE_MAC: &str = "X-Device-Mac";
 const HEADER_CONTENT_SHA256: &str = "X-Content-Sha256";
+/// 转发链数组（Base64URL 无 padding 的 JSON）；只在 `chain.len() > 1` 时发送。
+const HEADER_RELAY_CHAIN: &str = "X-Relay-Chain";
+/// relay 请求在根服务器上的路径前缀。
+const RELAY_PATH_PREFIX: &str = "/api/relay";
 
 /// 取本机物理地址（`X-Device-Mac` 的值）。
 ///
@@ -40,9 +44,7 @@ const HEADER_CONTENT_SHA256: &str = "X-Content-Sha256";
 fn require_device_mac() -> Result<&'static str, String> {
     let mac = crate::mac::device_mac();
     if mac.is_empty() {
-        return Err(
-            "无法识别本机物理地址（MAC），已阻止请求：请检查网络接口".to_string(),
-        );
+        return Err("无法识别本机物理地址（MAC），已阻止请求：请检查网络接口".to_string());
     }
     Ok(mac)
 }
@@ -394,7 +396,11 @@ fn audit_logs_target(
         push_query(&mut query, "category", category);
     }
     if let Some(success) = success {
-        push_query(&mut query, "success", if success { "true" } else { "false" });
+        push_query(
+            &mut query,
+            "success",
+            if success { "true" } else { "false" },
+        );
     }
     if let Some(keyword) = keyword.map(str::trim).filter(|value| !value.is_empty()) {
         push_query(&mut query, "keyword", keyword);
@@ -531,7 +537,10 @@ fn save_content_request(
         "path": path,
         "content": content,
     });
-    if let Some(expected) = expected_sha256.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(expected) = expected_sha256
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         payload["expectedSha256"] = Value::String(expected.to_string());
     }
     if let Some(root) = normalize_root(root) {
@@ -628,11 +637,7 @@ const OPEN_TEMP_FILE_MAX_CHARS: usize = 120;
 /// 只取最后一段，替换路径分隔符/控制字符/Windows 保留字符，去掉首尾的 `.` 与空格，
 /// 空名回退 `download`，并截断到 [`OPEN_TEMP_FILE_MAX_CHARS`] 个字符。
 pub fn open_temp_file_name(path: &str) -> String {
-    let raw = path
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or_default()
-        .trim();
+    let raw = path.rsplit(['/', '\\']).next().unwrap_or_default().trim();
     let mut safe = String::with_capacity(raw.len());
     for ch in raw.chars() {
         if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
@@ -718,9 +723,10 @@ fn open_command_parts(
                 "open",
                 vec!["-a".to_string(), "TextEdit".to_string(), target],
             ),
-            OpenApplication::Choose => {
-                ("osascript", vec!["-e".to_string(), MAC_CHOOSE_SCRIPT.to_string(), target])
-            }
+            OpenApplication::Choose => (
+                "osascript",
+                vec!["-e".to_string(), MAC_CHOOSE_SCRIPT.to_string(), target],
+            ),
         };
         Ok((program.to_string(), args))
     }
@@ -729,12 +735,15 @@ fn open_command_parts(
         let (program, args): (&str, Vec<String>) = match application {
             OpenApplication::Default => (
                 "cmd",
-                vec!["/c".to_string(), "start".to_string(), "".to_string(), target],
+                vec![
+                    "/c".to_string(),
+                    "start".to_string(),
+                    "".to_string(),
+                    target,
+                ],
             ),
             OpenApplication::VsCode => ("code", vec![target]),
-            OpenApplication::TextEdit | OpenApplication::Notepad => {
-                ("notepad", vec![target])
-            }
+            OpenApplication::TextEdit | OpenApplication::Notepad => ("notepad", vec![target]),
             OpenApplication::Choose => (
                 "rundll32",
                 vec!["shell32.dll,OpenAs_RunDLL".to_string(), target],
@@ -747,9 +756,7 @@ fn open_command_parts(
         let (program, args): (&str, Vec<String>) = match application {
             OpenApplication::Default => ("xdg-open", vec![target]),
             OpenApplication::VsCode => ("code", vec![target]),
-            OpenApplication::TextEdit | OpenApplication::Notepad => {
-                ("gedit", vec![target])
-            }
+            OpenApplication::TextEdit | OpenApplication::Notepad => ("gedit", vec![target]),
             OpenApplication::Choose => {
                 return Err("当前系统不支持选择打开方式".to_string());
             }
@@ -782,26 +789,100 @@ pub fn open_with_default_app(path: &Path) -> Result<(), String> {
     open_with_application(path, OpenApplication::Default)
 }
 
-/// 一次请求所需的配置快照（当前激活服务器的地址与设备身份）。/// 一次请求所需的配置快照（当前激活服务器的地址与设备身份）。
+/// `X-Relay-Chain` 数组项：一条转发链上的一跳（顺序 root → target）。
+///
+/// 数组里只有签名，没有 `appSecret`；`url`/`name` 仅用于路由和展示。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayChainEntry {
+    url: String,
+    name: String,
+    app_key: String,
+    timestamp: i64,
+    nonce: String,
+    signature: String,
+    device_id: String,
+}
+
+/// Base64URL（RFC 4648 §5，无 padding）编码：服务端用
+/// `Base64.getUrlEncoder().withoutPadding()` 解码。
+fn base64_url_no_pad(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut output = String::with_capacity((input.len() * 4 + 2) / 3);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        output.push(TABLE[(b0 >> 2) as usize] as char);
+        output.push(TABLE[(((b0 & 0b11) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((b1 & 0b1111) << 2) | (b2 >> 6)) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(b2 & 0b111111) as usize] as char);
+        }
+    }
+    output
+}
+
+/// 一次请求所需的配置快照：从根到目标的转发链（直连时只有一台）。
+///
+/// - `chain[0]`（root）是客户端直连的服务器，外层标准签名头用它；
+/// - `chain.last()`（target）是当前激活的目标服务器，业务操作都作用于它；
+/// - `chain.len() > 1` 时请求走根服务器的 `/api/relay` + 原 path，签名数组按跳预签。
 #[derive(Debug, Clone)]
 pub struct Api {
     http: reqwest::Client,
-    server: ServerProfile,
+    chain: Vec<ServerProfile>,
 }
 
 impl Api {
+    /// 直连单台服务器。
     pub fn new(http: reqwest::Client, server: ServerProfile) -> Self {
-        Self { http, server }
+        Self {
+            http,
+            chain: vec![server],
+        }
     }
 
-    /// 当前服务器配置（只读）。
+    /// 从 `[root, ..., target]` 链构造；空链视为调用方错误。
+    pub fn from_chain(http: reqwest::Client, chain: Vec<ServerProfile>) -> Self {
+        assert!(!chain.is_empty(), "relay chain must not be empty");
+        Self { http, chain }
+    }
+
+    /// 根服务器（客户端直连的 A）。
+    fn root(&self) -> &ServerProfile {
+        &self.chain[0]
+    }
+
+    /// 最终目标（B/C/…；直连时就是当前服务器）。
+    fn target(&self) -> &ServerProfile {
+        self.chain.last().expect("chain is not empty")
+    }
+
+    /// 是否经转发链访问（链长度 > 1）。
+    fn is_relay(&self) -> bool {
+        self.chain.len() > 1
+    }
+
+    /// 该 hop 实际收到的 path：非最后跳是 `/api/relay` + 原 path，最后一跳是原 path。
+    fn wire_path(&self, path: &str) -> String {
+        if self.is_relay() {
+            format!("{RELAY_PATH_PREFIX}{path}")
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// 当前 target 的配置（保留给现有调用方：续传状态按 target id 隔离）。
     pub fn server(&self) -> &ServerProfile {
-        &self.server
+        self.target()
     }
 
-    /// 服务端根地址（去掉末尾 `/`）。
+    /// 服务端根地址（去掉末尾 `/`）：始终是链的第 0 跳。
     fn base_url(&self) -> Result<String, String> {
-        let url = self.server.server_url.trim().trim_end_matches('/');
+        let url = self.root().server_url.trim().trim_end_matches('/');
         if url.is_empty() {
             return Err("请先在「设置」中配置服务器地址".to_string());
         }
@@ -809,20 +890,31 @@ impl Api {
     }
 
     fn require_configured(&self) -> Result<(), String> {
-        if !self.server.is_configured() {
-            return Err("请先在「设置」中配置服务器地址".to_string());
+        if !self.is_relay() {
+            if !self.root().is_configured() {
+                return Err("请先在「设置」中配置服务器地址".to_string());
+            }
+            return Ok(());
+        }
+        // 整条链的地址与凭据都必须有效，否则签名/路由会指向错误的目标。
+        for hop in &self.chain {
+            if !hop.is_configured() {
+                return Err("转发链配置不完整，请先在「设置」中修复服务器地址/凭据".to_string());
+            }
         }
         Ok(())
     }
 
-    /// 设备 UUID（每台服务器独立）。
+    /// 设备 UUID：外层标准签名头 / `X-Device-Id` 使用链的第 0 跳。
     fn device_id(&self) -> &str {
-        self.server.device_id.trim()
+        self.root().device_id.trim()
     }
 
-    /// 构造签名请求头。`target` 中的 query 会被规范化后参与签名，并原样用于实际请求。
-    ///
-    /// AppKey / AppSecret 默认使用客户端内置值；每台服务器可在设置中覆盖（见 [`ServerProfile`]）。
+    /// 构造签名请求头：
+    /// - 标准签名头（AppKey/Timestamp/Nonce/Signature）使用链的第 0 跳（root）；
+    /// - `X-Device-Id` = root 的 deviceId；`X-Device-Mac` 始终是本机 MAC；
+    /// - relay 时额外携带 `X-Relay-Chain`：每跳独立 timestamp/nonce/signature，数组里只有
+    ///   签名，绝不放 AppSecret。
     fn auth_headers(
         &self,
         method: &str,
@@ -833,15 +925,17 @@ impl Api {
     ) -> Result<HeaderMap, String> {
         // 先确认能拿到 MAC：读不到就不签名、不发请求（服务端会拉黑缺 MAC 的客户端）。
         let mac = require_device_mac()?;
+        let root = self.root();
         let timestamp = now_millis();
         let nonce = Uuid::new_v4().to_string();
+        let wire_path = self.wire_path(path);
         let signature = signer::sign_request(
-            self.server.effective_app_secret(),
-            self.server.effective_app_key(),
+            root.effective_app_secret(),
+            root.effective_app_key(),
             timestamp,
             &nonce,
             method,
-            path,
+            &wire_path,
             canonical_query,
             payload_hash,
         );
@@ -853,7 +947,7 @@ impl Api {
             headers.insert(name, value);
             Ok(())
         };
-        insert(HEADER_APP_KEY, self.server.effective_app_key())?;
+        insert(HEADER_APP_KEY, root.effective_app_key())?;
         insert(HEADER_TIMESTAMP, &timestamp.to_string())?;
         insert(HEADER_NONCE, &nonce)?;
         insert(HEADER_SIGNATURE, &signature)?;
@@ -861,15 +955,89 @@ impl Api {
             insert(HEADER_DEVICE_ID, self.device_id())?;
         }
         insert(HEADER_DEVICE_MAC, mac)?;
+        if let Some(chain) = self.chain_header(
+            method,
+            path,
+            canonical_query,
+            payload_hash,
+            timestamp,
+            &nonce,
+        )? {
+            insert(HEADER_RELAY_CHAIN, &chain)?;
+        }
         for (name, value) in extra {
             insert(name, value)?;
         }
         Ok(headers)
     }
 
+    /// 生成 `X-Relay-Chain` 的值（Base64URL 无 padding 的 JSON 数组）；直连返回 `None`。
+    ///
+    /// 每跳独立生成 timestamp/nonce，并按该跳实际收到的 path 签名：
+    /// - 非最后跳（relay node）：`/api/relay` + 原 path；
+    /// - 最后跳（最终目标）：原 path。
+    ///
+    /// canonicalQuery / payloadHash 所有跳相同（与契约一致）。
+    #[allow(clippy::too_many_arguments)]
+    fn chain_header(
+        &self,
+        method: &str,
+        path: &str,
+        canonical_query: &str,
+        payload_hash: &str,
+        root_timestamp: i64,
+        root_nonce: &str,
+    ) -> Result<Option<String>, String> {
+        if !self.is_relay() {
+            return Ok(None);
+        }
+        let mut entries = Vec::with_capacity(self.chain.len());
+        for (index, hop) in self.chain.iter().enumerate() {
+            let is_last = index + 1 == self.chain.len();
+            let hop_timestamp = if index == 0 {
+                root_timestamp
+            } else {
+                now_millis()
+            };
+            let hop_nonce = if index == 0 {
+                root_nonce.to_string()
+            } else {
+                Uuid::new_v4().to_string()
+            };
+            let hop_path = if is_last {
+                path.to_string()
+            } else {
+                format!("{RELAY_PATH_PREFIX}{path}")
+            };
+            let hop_signature = signer::sign_request(
+                hop.effective_app_secret(),
+                hop.effective_app_key(),
+                hop_timestamp,
+                &hop_nonce,
+                method,
+                &hop_path,
+                canonical_query,
+                payload_hash,
+            );
+            entries.push(RelayChainEntry {
+                url: hop.server_url.trim().trim_end_matches('/').to_string(),
+                name: hop.name.clone(),
+                app_key: hop.effective_app_key().to_string(),
+                timestamp: hop_timestamp,
+                nonce: hop_nonce,
+                signature: hop_signature,
+                device_id: hop.device_id.trim().to_string(),
+            });
+        }
+        let json = serde_json::to_vec(&entries).map_err(|e| format!("转发链序列化失败：{e}"))?;
+        Ok(Some(base64_url_no_pad(&json)))
+    }
+
     /// 拼接实际请求 URL（查询串使用签名时的规范化结果）。
+    ///
+    /// relay 时自动加 `/api/relay` 前缀（根服务器路径），直连时原样。
     fn build_url(&self, path: &str, canonical_query: &str) -> Result<String, String> {
-        let mut url = format!("{}{}", self.base_url()?, path);
+        let mut url = format!("{}{}", self.base_url()?, self.wire_path(path));
         if !canonical_query.is_empty() {
             url.push('?');
             url.push_str(canonical_query);
@@ -879,13 +1047,16 @@ impl Api {
 
     /// 发送带签名的 JSON 请求（GET/POST/DELETE），解析统一信封。
     ///
-    /// 网络抖动 / 超时 / 限流 / 5xx 会自动重试（最多 [`MAX_API_ATTEMPTS`] 次）。
+    /// 网络抖动 / 超时 / 限流 / 5xx 会自动重试（最多 [`MAX_API_ATTEMPTS`] 次）；
+    /// **relay 的非幂等写请求不自动重试**（避免「下游已处理但响应丢失」造成重复写）。
+    /// 每次重试都会重新生成整条链的 timestamp/nonce/signature。
     async fn send_json<T: DeserializeOwned>(
         &self,
         method: Method,
         target: &str,
         body: Option<Vec<u8>>,
     ) -> Result<T, String> {
+        let non_idempotent = !matches!(method, Method::GET | Method::HEAD);
         let mut attempt = 1;
         loop {
             match self
@@ -894,6 +1065,9 @@ impl Api {
             {
                 Ok(value) => return Ok(value),
                 Err(err) => {
+                    if self.is_relay() && non_idempotent {
+                        return Err(err);
+                    }
                     if attempt >= MAX_API_ATTEMPTS || !is_retryable_error(&err) {
                         return Err(err);
                     }
@@ -933,13 +1107,16 @@ impl Api {
         parse_envelope::<T>(&bytes, status)
     }
 
-    /// 发送无返回数据的有签名请求（如 DELETE）。
+    /// 发送无返回数据的有签名请求（如 DELETE）；relay 时不自动重试写请求。
     async fn send_void(&self, method: Method, target: &str) -> Result<(), String> {
         let mut attempt = 1;
         loop {
             match self.send_void_once(method.clone(), target).await {
                 Ok(()) => return Ok(()),
                 Err(err) => {
+                    if self.is_relay() {
+                        return Err(err);
+                    }
                     if attempt >= MAX_API_ATTEMPTS || !is_retryable_error(&err) {
                         return Err(err);
                     }
@@ -1024,11 +1201,13 @@ impl Api {
             .await
     }
 
-    /// `POST /api/auth/activate`：设备激活/绑定（契约 3.3），使用本服务器的 deviceId / deviceName。
+    /// `POST /api/auth/activate`：设备激活/绑定（契约 3.3），使用**目标服务器**的
+    /// deviceId / deviceName（relay 时是最后一跳 B/C 的设备身份，不是 root A 的）。
     pub async fn activate(&self) -> Result<Value, String> {
         self.require_configured()?;
-        let device_id = self.device_id();
-        let device_name = self.server.device_name.trim();
+        let target = self.target();
+        let device_id = target.device_id.trim();
+        let device_name = target.device_name.trim();
         if device_id.is_empty() {
             return Err("缺少设备 ID，请重启客户端后重试".to_string());
         }
@@ -1222,12 +1401,8 @@ impl Api {
         if upload_id.is_empty() {
             return Err("缺少上传会话 id".to_string());
         }
-        self.send_json::<ChunkStatus>(
-            Method::GET,
-            &format!("/api/files/upload/{upload_id}"),
-            None,
-        )
-        .await
+        self.send_json::<ChunkStatus>(Method::GET, &format!("/api/files/upload/{upload_id}"), None)
+            .await
     }
 
     /// `POST /api/files/upload/{uploadId}/complete`：合并分片并生成文件元数据。
@@ -1250,11 +1425,8 @@ impl Api {
         if upload_id.is_empty() {
             return Ok(());
         }
-        self.send_void(
-            Method::DELETE,
-            &format!("/api/files/upload/{upload_id}"),
-        )
-        .await
+        self.send_void(Method::DELETE, &format!("/api/files/upload/{upload_id}"))
+            .await
     }
 
     // ------------------------------------------------------------------
@@ -1347,7 +1519,7 @@ impl Api {
             &content_sha256,
             &[(HEADER_CONTENT_SHA256, content_sha256.clone())],
         )?;
-        let url = format!("{}/api/files/upload", self.base_url()?);
+        let url = self.build_url("/api/files/upload", "")?;
 
         let response = self
             .http
@@ -1403,11 +1575,7 @@ impl Api {
     /// 用系统默认应用打开刚下载到临时目录的文件（task-26）。
     ///
     /// 下载复用 `download_server_file`，不弹保存对话框；打开失败返回中文错误。
-    pub async fn open_server_file(
-        &self,
-        path: &str,
-        root: Option<&str>,
-    ) -> Result<String, String> {
+    pub async fn open_server_file(&self, path: &str, root: Option<&str>) -> Result<String, String> {
         let path = path.trim();
         if path.is_empty() {
             return Err("文件路径不能为空".to_string());
@@ -1557,7 +1725,8 @@ impl Api {
     ) -> Result<FileContent, String> {
         self.require_configured()?;
         let target = content_target(path, root)?;
-        self.send_json::<FileContent>(Method::GET, &target, None).await
+        self.send_json::<FileContent>(Method::GET, &target, None)
+            .await
     }
 
     /// `PUT /api/files/content`：覆盖保存文本文件（task-23）。
@@ -1701,14 +1870,21 @@ fn api_error(code: i64, message: &str) -> String {
         40000 => "请求参数错误",
         40001 => "文件内容校验失败（SHA-256 不一致）",
         40003 => "文件超过大小限制",
+        40010 => "转发链无效",
         40100 => "签名无效，请检查 AppSecret",
         40101 => "请求已过期，请检查本机时间",
         40102 => "请求重复，请重试",
         40103 => "客户端未授权，请检查 AppKey",
+        40110 => "转发目标鉴权失败",
         40300 => "设备未授权，请重新激活",
+        40320 => "转发功能未开启",
         40400 => "资源不存在",
         42900 => "请求过于频繁，请稍后重试",
         50000 => "服务器内部错误",
+        50210 => "转发目标不可达",
+        50211 => "转发目标返回异常",
+        50212 => "转发目标拒绝来源身份",
+        50410 => "转发目标超时",
         _ => {
             if message.trim().is_empty() {
                 return format!("请求失败（code={code}）");
@@ -1770,7 +1946,30 @@ fn network_error(error: reqwest::Error) -> String {
 }
 
 /// 错误是否值得重试（网络抖动 / 超时 / 限流 / 5xx）。
+///
+/// relay 相关错误（转发链无效/转发目标鉴权失败/不可达/拒绝来源/超时）不自动重试：
+/// 中转节点不做自动重试，写请求重试可能造成重复写。
 pub fn is_retryable_error(message: &str) -> bool {
+    for code in [
+        "40010", "40110", "40320", "50210", "50211", "50212", "50410",
+    ] {
+        if message.contains(code) {
+            return false;
+        }
+    }
+    for text in [
+        "转发链无效",
+        "转发目标鉴权失败",
+        "转发功能未开启",
+        "转发目标不可达",
+        "转发目标返回异常",
+        "转发目标拒绝来源身份",
+        "转发目标超时",
+    ] {
+        if message.contains(text) {
+            return false;
+        }
+    }
     message.contains("网络错误")
         || message.contains("请求超时")
         || message.contains("请求过于频繁")
@@ -1819,10 +2018,7 @@ mod tests {
         push_query(&mut query, "root", "work");
         assert_eq!(
             query,
-            format!(
-                "path={}&root=work",
-                signer::encode_query_component("a b/c")
-            )
+            format!("path={}&root=work", signer::encode_query_component("a b/c"))
         );
         assert_eq!(with_query("/api/files/dir", ""), "/api/files/dir");
         assert_eq!(
@@ -1872,8 +2068,8 @@ mod tests {
 
     #[test]
     fn rename_request_body_carries_path_new_name_and_root() {
-        let (target, body) = rename_request("docs/a.txt", "  b.txt  ", Some("media"))
-            .expect("构造 rename 请求");
+        let (target, body) =
+            rename_request("docs/a.txt", "  b.txt  ", Some("media")).expect("构造 rename 请求");
         assert_eq!(target, "/api/files/rename");
         let json: Value = serde_json::from_slice(&body).expect("rename 请求体是 JSON");
         assert_eq!(json["path"], "docs/a.txt");
@@ -1898,7 +2094,10 @@ mod tests {
         let (target, body) = rename_request("a.txt", "b.txt", None).expect("默认根 rename");
         assert_eq!(target, "/api/files/rename");
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.get("root").is_none(), "默认根不应携带 root（旧服务端兼容）");
+        assert!(
+            json.get("root").is_none(),
+            "默认根不应携带 root（旧服务端兼容）"
+        );
         // 空 root 与 None 等价
         let (_, empty_root_body) = rename_request("a.txt", "b.txt", Some("  ")).unwrap();
         let empty_json: Value = serde_json::from_slice(&empty_root_body).unwrap();
@@ -1941,7 +2140,10 @@ mod tests {
 
         let (_, same_root_body) = move_request("a.txt", Some("work"), None, "").unwrap();
         let same_root_json: Value = serde_json::from_slice(&same_root_body).unwrap();
-        assert!(same_root_json.get("targetRoot").is_none(), "同根应省略 targetRoot");
+        assert!(
+            same_root_json.get("targetRoot").is_none(),
+            "同根应省略 targetRoot"
+        );
         assert_eq!(same_root_json["targetDir"], "", "根目录目标为空串");
         assert_eq!(same_root_json["root"], "work");
         assert!(move_request("", None, None, "").is_err(), "空路径应被拒绝");
@@ -2014,7 +2216,10 @@ mod tests {
         let no_expected_json: Value = serde_json::from_slice(&no_expected).unwrap();
         assert!(no_expected_json.get("expectedSha256").is_none());
         assert!(no_expected_json.get("root").is_none());
-        assert!(save_content_request("", "x", None, None).is_err(), "空路径应被拒绝");
+        assert!(
+            save_content_request("", "x", None, None).is_err(),
+            "空路径应被拒绝"
+        );
     }
 
     #[test]
@@ -2028,7 +2233,10 @@ mod tests {
         let default_json: Value = serde_json::from_slice(&default_body).unwrap();
         assert!(default_json.get("root").is_none());
         for bad in ["", "   ", "docs/包.rar", "docs/包.tar.gz"] {
-            assert!(extract_zip_request(bad, None).is_err(), "非 zip 应被拒绝: {bad:?}");
+            assert!(
+                extract_zip_request(bad, None).is_err(),
+                "非 zip 应被拒绝: {bad:?}"
+            );
         }
     }
 
@@ -2044,8 +2252,7 @@ mod tests {
         assert_eq!(payload["cwd"], "/tmp");
         assert_eq!(payload["root"], "work");
 
-        let (_target, body) =
-            terminal_exec_request("session-12345678", "pwd", None, None).unwrap();
+        let (_target, body) = terminal_exec_request("session-12345678", "pwd", None, None).unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
         assert!(payload.get("cwd").is_none());
         assert!(payload.get("root").is_none());
@@ -2064,14 +2271,11 @@ mod tests {
                 .unwrap_err()
                 .contains("单行")
         );
-        assert!(terminal_exec_request(
-            "session-12345678",
-            &"x".repeat(4097),
-            None,
-            None
-        )
-        .unwrap_err()
-        .contains("过长"));
+        assert!(
+            terminal_exec_request("session-12345678", &"x".repeat(4097), None, None)
+                .unwrap_err()
+                .contains("过长")
+        );
     }
 
     #[test]
@@ -2123,8 +2327,14 @@ mod tests {
         for value in ["default", "vscode", "textedit", "notepad", "choose"] {
             assert!(OpenApplication::parse(value).is_ok(), "{value} 应解析成功");
         }
-        assert_eq!(OpenApplication::parse("default").unwrap(), OpenApplication::Default);
-        assert_eq!(OpenApplication::parse("vscode").unwrap(), OpenApplication::VsCode);
+        assert_eq!(
+            OpenApplication::parse("default").unwrap(),
+            OpenApplication::Default
+        );
+        assert_eq!(
+            OpenApplication::parse("vscode").unwrap(),
+            OpenApplication::VsCode
+        );
         let error = OpenApplication::parse("photoshop").unwrap_err();
         assert!(error.contains("不支持的打开方式"), "{error}");
     }
@@ -2171,7 +2381,9 @@ mod tests {
         assert!(is_session_not_found_error("资源不存在：上传会话不存在"));
         assert!(is_session_not_found_error("code=40400"));
         assert!(!is_session_not_found_error("网络错误"));
-        assert!(is_content_mismatch_error("文件内容校验失败（SHA-256 不一致）"));
+        assert!(is_content_mismatch_error(
+            "文件内容校验失败（SHA-256 不一致）"
+        ));
         assert!(is_content_mismatch_error("40001"));
         assert!(!is_content_mismatch_error("文件超过大小限制"));
         assert!(is_too_large_error("文件超过大小限制"));
@@ -2219,8 +2431,11 @@ mod tests {
             "请求参数错误"
         );
         assert_eq!(
-            parse_envelope::<Value>(r#"{"code":0,"message":"ok","data":null}"#.as_bytes(), StatusCode::OK)
-                .unwrap_err(),
+            parse_envelope::<Value>(
+                r#"{"code":0,"message":"ok","data":null}"#.as_bytes(),
+                StatusCode::OK
+            )
+            .unwrap_err(),
             "服务器返回数据为空"
         );
     }
@@ -2275,10 +2490,11 @@ mod tests {
         );
 
         // 页码至少 1、size 限制 1..200；空白可选参数应省略。
-        let clamped = audit_logs_target(0, 500, Some("  "), None, None, Some("  "), Some(""), None)
-            .unwrap();
+        let clamped =
+            audit_logs_target(0, 500, Some("  "), None, None, Some("  "), Some(""), None).unwrap();
         assert_eq!(clamped, "/api/audit/logs?page=1&size=200");
-        let success_true = audit_logs_target(1, 20, None, None, Some(true), None, None, None).unwrap();
+        let success_true =
+            audit_logs_target(1, 20, None, None, Some(true), None, None, None).unwrap();
         assert!(success_true.ends_with("&success=true"));
     }
 
@@ -2384,10 +2600,10 @@ mod tests {
                 .await
                 .expect("查询操作日志");
             for _ in 0..30 {
-                let has_upload = page
-                    .items
-                    .iter()
-                    .any(|item| item.action.as_deref() == Some("upload") && item.file_name.as_deref() == Some(unique.as_str()));
+                let has_upload = page.items.iter().any(|item| {
+                    item.action.as_deref() == Some("upload")
+                        && item.file_name.as_deref() == Some(unique.as_str())
+                });
                 let has_terminal = page.items.iter().any(|item| {
                     item.action.as_deref() == Some("terminal.exec")
                         && item.terminal_command.as_deref() == Some(command.as_str())
@@ -2405,7 +2621,11 @@ mod tests {
                     .await
                     .expect("轮询操作日志");
             }
-            println!("[live audit page] total={} items={}", page.total, page.items.len());
+            println!(
+                "[live audit page] total={} items={}",
+                page.total,
+                page.items.len()
+            );
             assert!(page.total >= 4, "应至少有上传/删除/失败/终端 4 条日志");
             // multipart 上传不在 body 中，审计只记录 action/大小，fileName 可能为空；
             // 删除请求的 pathParam 才是文件名。
@@ -2464,10 +2684,7 @@ mod tests {
                 .expect("筛选失败");
             assert!(failures.total >= 1);
             assert!(failures.items.iter().all(|item| !item.success));
-            assert!(failures
-                .items
-                .iter()
-                .any(|item| item.error.is_some()));
+            assert!(failures.items.iter().any(|item| item.error.is_some()));
 
             // keyword 命中文件名（上传+删除）
             let keywords = api
@@ -2641,7 +2858,10 @@ mod tests {
                 .await
                 .expect_err("同名冲突应失败");
             println!("[live move conflict] {conflict}");
-            assert!(conflict.contains("已存在"), "冲突提示应中文透传: {conflict}");
+            assert!(
+                conflict.contains("已存在"),
+                "冲突提示应中文透传: {conflict}"
+            );
 
             // 6) 移动到自身子目录
             let self_error = api
@@ -2818,7 +3038,10 @@ mod tests {
                     .terminal_exec(&strict_session, "sleep 5", None, None)
                     .await
                     .expect("超时仍应返回 200 + exitCode");
-                println!("[live] timeout: exit={} output={:?}", timeout.exit_code, timeout.output);
+                println!(
+                    "[live] timeout: exit={} output={:?}",
+                    timeout.exit_code, timeout.output
+                );
                 assert_eq!(timeout.exit_code, -1);
                 assert!(timeout.output.contains("超时"));
 
@@ -2850,6 +3073,10 @@ mod tests {
         let header = |name: &str| headers.get(name).unwrap().to_str().unwrap().to_string();
         assert_eq!(header(HEADER_APP_KEY), "custom-app");
         assert_eq!(header(HEADER_DEVICE_ID), api.device_id());
+        assert!(
+            headers.get(HEADER_RELAY_CHAIN).is_none(),
+            "直连请求不能携带 X-Relay-Chain"
+        );
 
         let timestamp: i64 = header(HEADER_TIMESTAMP).parse().expect("时间戳");
         let expected = signer::sign_request(
@@ -2873,5 +3100,270 @@ mod tests {
             headers.get(HEADER_APP_KEY).unwrap().to_str().unwrap(),
             crate::builtin::app_key()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // 转发链（relay）单测：路径前缀、链头、每跳签名、错误映射与重试
+    // ------------------------------------------------------------------
+
+    use crate::config::ServerKind;
+
+    /// 一台测试服务器（完整字面量，避免依赖本机设备信息）。
+    #[allow(clippy::too_many_arguments)]
+    fn test_profile(
+        id: &str,
+        name: &str,
+        server_url: &str,
+        device_id: &str,
+        app_key: &str,
+        app_secret: &str,
+        kind: ServerKind,
+        parent_id: Option<&str>,
+    ) -> ServerProfile {
+        ServerProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            server_url: server_url.to_string(),
+            device_id: device_id.to_string(),
+            device_name: "dev".to_string(),
+            app_key: app_key.to_string(),
+            app_secret: app_secret.to_string(),
+            kind,
+            parent_id: parent_id.map(str::to_string),
+        }
+    }
+
+    /// `A(direct) → B(relay)` 两跳测试链。
+    fn test_relay_api() -> Api {
+        let root = test_profile(
+            "a",
+            "A",
+            "http://a.example.com/",
+            "da",
+            "ka",
+            "sa",
+            ServerKind::Direct,
+            None,
+        );
+        let relay = test_profile(
+            "b",
+            "B",
+            "http://b.example.com",
+            "db",
+            "kb",
+            "sb",
+            ServerKind::Relay,
+            Some("a"),
+        );
+        Api::from_chain(reqwest::Client::new(), vec![root, relay])
+    }
+
+    fn base64_url_decode(input: &str) -> Result<Vec<u8>, String> {
+        let mut output = Vec::new();
+        let mut buffer: u32 = 0;
+        let mut bits = 0;
+        for byte in input.bytes() {
+            let value = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'-' => 62,
+                b'_' => 63,
+                _ => return Err("invalid base64url".into()),
+            } as u32;
+            buffer = (buffer << 6) | value;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                output.push((buffer >> bits) as u8);
+                buffer &= (1 << bits) - 1;
+            }
+        }
+        Ok(output)
+    }
+
+    fn decode_chain_header(encoded: &str) -> Vec<serde_json::Value> {
+        let json = String::from_utf8(base64_url_decode(encoded).expect("合法 base64url"))
+            .expect("链头是 UTF-8 JSON");
+        serde_json::from_str(&json).expect("链头是 JSON 数组")
+    }
+
+    #[test]
+    fn base64url_is_unpadded() {
+        assert_eq!(base64_url_no_pad(b"hello"), "aGVsbG8");
+        assert_eq!(base64_url_no_pad(b"f"), "Zg");
+        assert_eq!(base64_url_no_pad(b"fo"), "Zm8");
+        assert_eq!(base64_url_no_pad(b"foo"), "Zm9v");
+        assert_eq!(base64_url_decode("aGVsbG8").unwrap(), b"hello");
+        // URL-safe 字母表：不出现 `+` / `/` / `=`。
+        let encoded = base64_url_no_pad(&[0xfb, 0xff, 0xbf]);
+        assert!(encoded
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+        assert_eq!(base64_url_decode(&encoded).unwrap(), vec![0xfb, 0xff, 0xbf]);
+    }
+
+    #[test]
+    fn relay_wire_path_and_build_url_are_prefixed() {
+        let api = test_relay_api();
+        assert_eq!(api.wire_path("/api/files"), "/api/relay/api/files");
+        assert_eq!(api.base_url().unwrap(), "http://a.example.com");
+        assert_eq!(
+            api.build_url("/api/files", "page=1").unwrap(),
+            "http://a.example.com/api/relay/api/files?page=1"
+        );
+        assert_eq!(
+            api.build_url("/api/files/upload", "").unwrap(),
+            "http://a.example.com/api/relay/api/files/upload"
+        );
+        assert!(api.is_relay());
+        assert_eq!(api.root().id, "a");
+        assert_eq!(api.target().id, "b");
+        assert_eq!(api.server().id, "b", "server() 返回 target");
+
+        // 直连不加前缀、不发链头。
+        let direct = Api::new(
+            reqwest::Client::new(),
+            test_profile(
+                "a",
+                "A",
+                "https://example.com/scopeftp",
+                "da",
+                "ka",
+                "sa",
+                ServerKind::Direct,
+                None,
+            ),
+        );
+        assert_eq!(direct.wire_path("/api/files"), "/api/files");
+        assert!(!direct.is_relay());
+        assert!(direct
+            .chain_header("GET", "/api/files", "", EMPTY_SHA256, 123, "n")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn relay_chain_header_contains_one_entry_per_hop_with_correct_paths() {
+        let api = test_relay_api();
+        let encoded = api
+            .chain_header(
+                "GET",
+                "/api/files",
+                "page=1",
+                EMPTY_SHA256,
+                123,
+                "root-nonce",
+            )
+            .unwrap()
+            .unwrap();
+        let entries = decode_chain_header(&encoded);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["url"], "http://a.example.com");
+        assert_eq!(entries[0]["appKey"], "ka");
+        assert_eq!(entries[0]["deviceId"], "da");
+        assert_eq!(entries[0]["timestamp"], 123);
+        assert_eq!(entries[0]["nonce"], "root-nonce");
+        assert_eq!(entries[1]["url"], "http://b.example.com");
+        assert_eq!(entries[1]["appKey"], "kb");
+        assert_eq!(entries[1]["deviceId"], "db");
+        assert_ne!(entries[1]["nonce"], entries[0]["nonce"], "每跳 nonce 独立");
+
+        // root 按实际收到的 `/api/relay` + 原 path 签名。
+        let expected_root = signer::sign_request(
+            "sa",
+            "ka",
+            123,
+            "root-nonce",
+            "GET",
+            "/api/relay/api/files",
+            "page=1",
+            EMPTY_SHA256,
+        );
+        assert_eq!(
+            entries[0]["signature"], expected_root,
+            "非最后跳签 /api/relay + path"
+        );
+
+        // 最后跳（最终目标）按原 path 签名。
+        let relay_timestamp = entries[1]["timestamp"].as_i64().unwrap();
+        let relay_nonce = entries[1]["nonce"].as_str().unwrap();
+        let expected_relay = signer::sign_request(
+            "sb",
+            "kb",
+            relay_timestamp,
+            relay_nonce,
+            "GET",
+            "/api/files",
+            "page=1",
+            EMPTY_SHA256,
+        );
+        assert_eq!(entries[1]["signature"], expected_relay, "最后跳签原 path");
+
+        // 链头里只有签名，不能出现任何 secret。
+        let raw = String::from_utf8(base64_url_decode(&encoded).unwrap()).unwrap();
+        assert!(
+            !raw.contains("\"sa\"") && !raw.contains("\"sb\""),
+            "链头不能包含 secret"
+        );
+        assert!(!raw.contains("appSecret"));
+    }
+
+    #[test]
+    fn relay_chain_header_signs_payload_hash_for_uploads() {
+        let api = test_relay_api();
+        let payload_hash = signer::sha256_hex(b"chunk-bytes");
+        let encoded = api
+            .chain_header(
+                "PUT",
+                "/api/files/upload/u1/chunk",
+                "index=0",
+                &payload_hash,
+                1,
+                "n0",
+            )
+            .unwrap()
+            .unwrap();
+        let entries = decode_chain_header(&encoded);
+        assert_eq!(entries.len(), 2);
+
+        let expected_root = signer::sign_request(
+            "sa",
+            "ka",
+            1,
+            "n0",
+            "PUT",
+            "/api/relay/api/files/upload/u1/chunk",
+            "index=0",
+            &payload_hash,
+        );
+        assert_eq!(entries[0]["signature"], expected_root);
+        let timestamp = entries[1]["timestamp"].as_i64().unwrap();
+        let nonce = entries[1]["nonce"].as_str().unwrap();
+        let expected_relay = signer::sign_request(
+            "sb",
+            "kb",
+            timestamp,
+            nonce,
+            "PUT",
+            "/api/files/upload/u1/chunk",
+            "index=0",
+            &payload_hash,
+        );
+        assert_eq!(entries[1]["signature"], expected_relay);
+    }
+
+    #[test]
+    fn relay_errors_map_to_chinese_and_are_not_retried() {
+        assert_eq!(api_error(40010, ""), "转发链无效");
+        assert!(api_error(50210, "目标 B 不可达").contains("转发目标不可达"));
+        for code in [40010, 40110, 40320, 50210, 50211, 50212, 50410] {
+            let message = api_error(code, "");
+            assert!(!message.is_empty());
+            assert!(!is_retryable_error(&message), "{code} 不应重试: {message}");
+        }
+        // 直连/网络错误仍可重试。
+        assert!(is_retryable_error("网络错误：请求超时"));
+        assert!(is_retryable_error("服务器内部错误（code=50000）"));
     }
 }

@@ -1,5 +1,7 @@
 package com.wenshan.upload.dto;
 
+import com.wenshan.upload.audit.RelayViaHop;
+
 /**
  * 审计日志查询结果中的一条记录（字段与 JSONL 审计事件一致，额外带数据库自增 id）。
  */
@@ -30,6 +32,7 @@ public record AuditLogItem(
         boolean success,
         String error,
         String userAgent,
-        String fileName
+        String fileName,
+        java.util.List<RelayViaHop> relayVia
 ) {
 }

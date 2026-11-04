@@ -25,17 +25,19 @@
 - 元数据：文件名、大小、类型、SHA-256、说明、appKey、deviceId、上传时间；持久化在 `<root>/.upload-meta/metadata.sqlite3`（SQLite，WAL/事务/索引），启动加载为内存只读快照
 - 安全：`ClientGuardFilter`（最高优先级，可选的身份强制：所有 `/api/**` 含 health 的 MAC/IP 黑名单）→ `SignatureFilter` 统一校验业务接口，
   校验 appKey、时间戳窗口、HMAC-SHA256 签名、nonce 防重放、可选的设备绑定、令牌桶限流；开启身份强制时 activate 还要求同 MAC+IP 的近期 verify
+- 多级转发：`RelayForwardFilter`（`HIGHEST_PRECEDENCE + 20`，在 `DispatcherServlet` 前）处理 `/api/relay/api/**`；弹出 `X-Relay-Chain` 第 0 跳、校验链头与外层签名头一致、追加 `X-Relay-Via`，再按剩余链流式转发到下一跳或最终目标。JSON 用缓存 body 重放，multipart/octet/下载直接桥接原始流（不整包缓存）。默认关闭，需 `app.relay.enabled=true`
 - 端口：默认 9090（dev/application.yml；docker/xiaoshan 8080、xihu 8787 由环境文件覆盖），上下文路径：`/api`
 
 ### 客户端
 
 - Tauri 2（Rust）+ React 18 + TypeScript + Vite 6 + Ant Design 5（中文语言包）
 - 所有网络请求、HMAC 签名、文件读写都在 **Rust 侧**完成，WebView 层拿不到 appSecret
-- **AppKey / AppSecret 默认内置在客户端**（`src-tauri/src/builtin.rs`，构建时可用 `UPLOAD_CLIENT_APP_KEY` / `UPLOAD_CLIENT_APP_SECRET` 覆盖）；设置页可按服务器填写自定义 AppKey/AppSecret，留空使用内置值
+- **AppKey / AppSecret**：保存 direct 与 relay 服务器时都要求显式填写，必须与服务端启动时一致；relay 额外禁止回退内置值，direct 的旧配置可回退编译期内置值（`src-tauri/src/builtin.rs`，发布构建用 `UPLOAD_CLIENT_APP_KEY` / `UPLOAD_CLIENT_APP_SECRET` 覆盖）
 - 主界面为左右两栏（FTP 式）：左侧是当前连接的服务器信息（状态/地址/设备/存储目录/大小上限 + 验证连接/设置），右侧是服务器目录浏览器
 - 右侧目录浏览器支持拖拽上传：把文件（可多选）拖进右侧任意位置即上传到**当前浏览目录**，并复用 `upload-progress` 显示进度；文件行可下载/删除，目录行点击进入，目录也可删除（非空目录需二次确认后由服务端 `recursive=true` 递归删除）
 - 大文件（>32MB）自动分片上传（8MB/片）并支持断点续传；右侧搜索框可在存储根目录内递归搜索，点结果跳到所在目录并高亮
 - 左侧支持保存多台服务器（添加/切换/编辑），每台独立 deviceId，当前 active server 决定所有请求目标
+- **转发链**：配置 v3 用 `kind=direct|relay` + `parentId` 组成任意深度树（`A → B → C → …`）。左侧递归树显示「转发」Tag；A/B/C 的「转发目标」卡片和 `+` 只在 active 且连接成功后出现。访问 target 前客户端按 `[A]`、`[A,B]`… 逐跳 verify + activate 祖先，再验证 target；每次请求用 `X-Relay-Chain` 携带每跳签名（无 secret），A/B/C 审计通过 `X-Relay-Via` 记录来源链，前端可点击来源切换本地服务器。删除父节点级联删除整棵子树与续传状态；允许删到空配置
 - 审计：`SignatureFilter` 对每个 `/api/**` 请求生成 `X-Request-Id`，异步写 JSONL + SQLite（`app.audit.*`），成功/失败/签名失败/限流均记录，敏感字段脱敏；日志目录由各环境文件的 `app.audit.dir` 指定（dev 是 `./logs/dev/audit`），不在存储根内；客户端用 `GET /api/audit/logs?category=both` 合并查看操作/连接日志（也可用 `operation` / `connection` 单独筛选）
 - 底部远程终端面板：签名 `POST /api/terminal/exec`，服务端执行 `/bin/sh -lc`，会话 cwd 持久；终端只能访问 `app.storage.roots` 内目录（TerminalScope + TerminalPathGuard 拦截越界 cwd/参数/重定向/symlink），高危命令由 TerminalGuard 拦截并弹警告；**护栏不是沙箱**，生产环境文件里设 `app.terminal.enabled: false` 关闭
 - 目录列表为 Finder 式（名称/修改日期/大小/种类），单击选中、↑↓ 移动、Enter/再点重命名、双击文件打开、双击目录进入；下载/删除等走右键菜单；删除支持文件与目录，非空目录删除前强提示「目录非空（共 N 项），其中的文件和子目录会一并删除，且不可恢复」，确认后带 `recursive=true` 一次性递归删除
@@ -66,6 +68,7 @@
 - 令牌桶限流（按 appKey + IP）
 - 单次 multipart 请求 200MB、请求体大小限制（大文件走分片上传，分片与文件上限默认 5GB）、原始文件名清洗（**不再限制扩展名，任意类型可上传**）
 - 生产部署强制 HTTPS（客户端与 nginx 配置中说明）；服务端 appSecret 通过 `UPLOAD_APP_SECRET` 或启动 Jar 时的 `--app-secret` 注入，不写死在镜像里；客户端内置值需与服务端一致，也可在「设置」中按服务器填自定义 AppKey/AppSecret
+- 多级转发每跳独立 HMAC 签名，链头不含 secret；目标 URL 经 SSRF 守卫（只允许 http/https，默认拒绝 loopback/link-local/云元数据，私网可配置放行），成功/失败/超时分别映射 relay 错误码
 
 > 说明：客户端是分发给终端用户的程序，任何内嵌密钥都有被逆向提取的可能。
 > 本项目的做法是把密钥放在 Rust 侧、配合设备绑定、限流与密钥轮换，属于业界常见的「提高攻击成本」方案；
@@ -100,6 +103,7 @@
 | POST | `/api/files/move` | 移动文件/目录到指定目录，可跨存储根 | 是 |
 | GET | `/api/storage/roots` | 列出配置的存储根（id/name/path） | 是 |
 | GET | `/api/audit/logs` | 查询当前 appKey 的操作审计日志（SQLite，分页/筛选） | 是 |
+| ANY | `/api/relay/api/**` | 多级转发入口（A/B 等中转节点；原 path 追加在 `/api/relay` 后；需 `app.relay.enabled=true`） | 是（外层请求按第 0 跳签名） |
 
 ## 4. 本地运行
 

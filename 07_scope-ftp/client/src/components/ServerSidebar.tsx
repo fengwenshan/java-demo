@@ -1,10 +1,12 @@
+import type { ReactNode } from "react";
 import {
   EditOutlined,
   FolderOutlined,
+  NodeIndexOutlined,
   PlusOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Tooltip, Typography } from "antd";
+import { Alert, Button, Tag, Tooltip, Typography } from "antd";
 
 import type {
   ConfigView,
@@ -26,6 +28,8 @@ export interface ServerSidebarProps {
   onSelectRoot: (id: string) => void;
   onSelectServer: (id: string) => void;
   onAddServer: () => void;
+  /** 在 active 且已连接的父服务器下新建转发目标。 */
+  onAddRelay: (parentId: string) => void;
   onEditServer: (id: string) => void;
   onOpenSettings: () => void;
 }
@@ -41,12 +45,110 @@ export default function ServerSidebar({
   onSelectRoot,
   onSelectServer,
   onAddServer,
+  onAddRelay,
   onEditServer,
   onOpenSettings,
 }: ServerSidebarProps) {
   const activeRoot =
     roots.find((root) => root.id === activeRootId) ?? roots[0] ?? null;
   const servers = config?.servers ?? [];
+
+  /** 按 parentId 分组：递归渲染 A → B → C 的转发树。 */
+  const childrenOf = (parentId: string | null) =>
+    servers.filter((server) => (server.parentId ?? null) === parentId);
+
+  const renderServer = (server: ServerView, depth: number): ReactNode => {
+    const active = server.id === activeServer?.id;
+    const children = childrenOf(server.id);
+    return (
+      <div key={server.id} className="server-tree-node">
+        <div
+          role="button"
+          tabIndex={0}
+          className={`server-list-item${active ? " server-list-item-active" : ""}${
+            server.kind === "relay" ? " server-list-item-relay" : ""
+          }`}
+          style={{ paddingLeft: 8 + depth * 16 }}
+          data-testid="server-list-item"
+          data-server-id={server.id}
+          data-server-kind={server.kind}
+          data-parent-id={server.parentId ?? ""}
+          data-active={active ? "true" : "false"}
+          title={`${server.name} · ${server.serverUrl}`}
+          onClick={() => onSelectServer(server.id)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onSelectServer(server.id);
+            }
+          }}
+        >
+          <span
+            className={`server-status-dot${active ? " is-active" : ""}${
+              active && connection.status === "failed" ? " is-error" : ""
+            }`}
+            title={
+              active
+                ? connection.status === "connected"
+                  ? "已连接"
+                  : connection.status === "checking"
+                    ? "检测中"
+                    : connection.message || "未连接"
+                : undefined
+            }
+          />
+          <div className="server-list-main">
+            <Text strong={active} ellipsis className="server-list-name">
+              {server.name}
+            </Text>
+            <Text type="secondary" ellipsis className="server-list-url">
+              {server.serverUrl}
+            </Text>
+          </div>
+          {server.kind === "relay" && (
+            <Tag
+              icon={<NodeIndexOutlined />}
+              className="server-relay-tag"
+              data-testid="relay-badge"
+            >
+              转发
+            </Tag>
+          )}
+          <Tooltip title={`编辑「${server.name}」`}>
+            <Button
+              type="text"
+              size="small"
+              className="server-list-edit"
+              icon={<EditOutlined />}
+              aria-label={`编辑 ${server.name}`}
+              data-testid={server.kind === "relay" ? "edit-relay" : "edit-server"}
+              onClick={(event) => {
+                event.stopPropagation();
+                onEditServer(server.id);
+              }}
+            />
+          </Tooltip>
+          {active && connection.status === "connected" && (
+            <Tooltip title="添加转发目标">
+              <Button
+                type="text"
+                size="small"
+                className="server-list-add-relay"
+                icon={<PlusOutlined />}
+                aria-label="添加转发目标"
+                data-testid="add-relay"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onAddRelay(server.id);
+                }}
+              />
+            </Tooltip>
+          )}
+        </div>
+        {children.map((child) => renderServer(child, depth + 1))}
+      </div>
+    );
+  };
 
   return (
     <div className="server-sidebar">
@@ -80,69 +182,7 @@ export default function ServerSidebar({
           </Tooltip>
         </div>
         <div className="server-list" data-testid="server-list">
-          {servers.map((server) => {
-            const active = server.id === activeServer?.id;
-            return (
-              <div
-                key={server.id}
-                role="button"
-                tabIndex={0}
-                className={`server-list-item${active ? " server-list-item-active" : ""}`}
-                data-testid="server-list-item"
-                data-server-id={server.id}
-                data-active={active ? "true" : "false"}
-                title={`${server.name} · ${server.serverUrl}`}
-                onClick={() => onSelectServer(server.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    onSelectServer(server.id);
-                  }
-                }}
-              >
-                <span
-                  className={`server-status-dot${active ? " is-active" : ""}${
-                    active && connection.status === "failed" ? " is-error" : ""
-                  }`}
-                  title={
-                    active
-                      ? connection.status === "connected"
-                        ? "已连接"
-                        : connection.status === "checking"
-                          ? "检测中"
-                          : connection.message || "未连接"
-                      : undefined
-                  }
-                />
-                <div className="server-list-main">
-                  <Text
-                    strong={active}
-                    ellipsis
-                    className="server-list-name"
-                  >
-                    {server.name}
-                  </Text>
-                  <Text type="secondary" ellipsis className="server-list-url">
-                    {server.serverUrl}
-                  </Text>
-                </div>
-                <Tooltip title={`编辑「${server.name}」`}>
-                  <Button
-                    type="text"
-                    size="small"
-                    className="server-list-edit"
-                    icon={<EditOutlined />}
-                    aria-label={`编辑 ${server.name}`}
-                    data-testid="edit-server"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onEditServer(server.id);
-                    }}
-                  />
-                </Tooltip>
-              </div>
-            );
-          })}
+          {childrenOf(null).map((server) => renderServer(server, 0))}
           {servers.length === 0 && (
             <Text type="secondary" className="server-empty-hint">
               还没有服务器，点击右上角 + 添加。

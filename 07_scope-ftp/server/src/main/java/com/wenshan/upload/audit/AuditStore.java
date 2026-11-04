@@ -1,5 +1,7 @@
 package com.wenshan.upload.audit;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wenshan.upload.common.BizException;
 import com.wenshan.upload.common.ErrorCode;
 import com.wenshan.upload.config.AppProperties;
@@ -38,10 +40,11 @@ public class AuditStore {
     private static final Logger log = LoggerFactory.getLogger(AuditStore.class);
     public static final String DB_FILE_NAME = "audit.sqlite3";
     public static final int MAX_PAGE_SIZE = 200;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String COLUMNS = "id, ts, request_id, app_key, client_name, device_id, client_ip, "
             + "method, path, query, action, root, target_root, path_param, target_dir, session_id, "
             + "terminal_command, body, content_sha256, request_bytes, response_bytes, duration_ms, "
-            + "http_status, success, error, user_agent, file_name, created_at";
+            + "http_status, success, error, user_agent, file_name, relay_via, created_at";
 
     private final Path dir;
     private final Path dbPath;
@@ -114,8 +117,8 @@ public class AuditStore {
                             + "method, path, query, action, root, target_root, path_param, target_dir, "
                             + "session_id, terminal_command, body, content_sha256, request_bytes, "
                             + "response_bytes, duration_ms, http_status, success, error, user_agent, "
-                            + "file_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                            + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                            + "file_name, relay_via, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                            + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
                 int index = 1;
                 statement.setString(index++, event.ts());
                 statement.setString(index++, event.requestId());
@@ -142,8 +145,9 @@ public class AuditStore {
                 statement.setInt(index++, event.success() ? 1 : 0);
                 setNullableString(statement, index++, event.error());
                 setNullableString(statement, index++, event.userAgent());
-                setNullableString(statement, index, event.fileName());
-                statement.setLong(index + 1, createdAtMillis(event.ts()));
+                setNullableString(statement, index++, event.fileName());
+                setNullableString(statement, index++, relayViaJson(event.relayVia()));
+                statement.setLong(index, createdAtMillis(event.ts()));
                 statement.executeUpdate();
             }
             return true;
@@ -277,8 +281,12 @@ public class AuditStore {
                         error TEXT,
                         user_agent TEXT,
                         file_name TEXT,
+                        relay_via TEXT,
                         created_at INTEGER NOT NULL
                     )""");
+            // 旧库升级：CREATE TABLE IF NOT EXISTS 不会补列，用 PRAGMA + ALTER TABLE 自动迁移。
+            ensureColumn(connection, "relay_via",
+                    "ALTER TABLE audit_log ADD COLUMN relay_via TEXT");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts)");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action)");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_audit_log_app_key ON audit_log(app_key)");
@@ -292,6 +300,22 @@ public class AuditStore {
             try (ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM audit_log")) {
                 resultSet.next();
             }
+        }
+    }
+
+    /** 旧库启动时自动补列；已存在则直接返回。 */
+    private static void ensureColumn(Connection connection, String column, String ddl)
+            throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("PRAGMA table_info(audit_log)")) {
+            while (resultSet.next()) {
+                if (column.equals(resultSet.getString("name"))) {
+                    return;
+                }
+            }
+        }
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate(ddl);
         }
     }
 
@@ -392,7 +416,34 @@ public class AuditStore {
                 resultSet.getInt("success") == 1,
                 resultSet.getString("error"),
                 resultSet.getString("user_agent"),
-                resultSet.getString("file_name"));
+                resultSet.getString("file_name"),
+                parseRelayVia(resultSet.getString("relay_via")));
+    }
+
+    /** 序列化来源链为 JSON 数组；空列表存 NULL（旧行 compat）。 */
+    private static String relayViaJson(List<RelayViaHop> relayVia) {
+        if (relayVia == null || relayVia.isEmpty()) {
+            return null;
+        }
+        try {
+            return MAPPER.writeValueAsString(relayVia);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 反序列化来源链；NULL/损坏统一返回空列表，查询接口不因旧数据失败。 */
+    private static List<RelayViaHop> parseRelayVia(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<RelayViaHop> hops = MAPPER.readValue(json, new TypeReference<List<RelayViaHop>>() {
+            });
+            return hops == null ? List.of() : List.copyOf(hops);
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     private static Long nullableLong(ResultSet resultSet, String column) throws SQLException {

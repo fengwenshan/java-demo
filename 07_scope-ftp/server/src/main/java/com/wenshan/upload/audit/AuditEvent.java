@@ -29,6 +29,7 @@ public record AuditEvent(
         boolean success,
         String error,
         String userAgent,
-        String fileName
+        String fileName,
+        java.util.List<RelayViaHop> relayVia
 ) {
 }

@@ -30,6 +30,7 @@ public class AppProperties implements InitializingBean {
     private final Storage storage = new Storage();
     private final Terminal terminal = new Terminal();
     private final Audit audit = new Audit();
+    private final Relay relay = new Relay();
 
     /** 启动即校验客户端凭证：没有可用的 AppKey/AppSecret 时直接让 Spring 启动失败。 */
     @Override
@@ -87,6 +88,10 @@ public class AppProperties implements InitializingBean {
 
     public Audit getAudit() {
         return audit;
+    }
+
+    public Relay getRelay() {
+        return relay;
     }
 
     public static class Security {
@@ -511,6 +516,123 @@ public class AppProperties implements InitializingBean {
 
         public void setMaxHistoryDays(int maxHistoryDays) {
             this.maxHistoryDays = maxHistoryDays;
+        }
+    }
+
+    /**
+     * 多级转发（{@code /api/relay}）配置。默认关闭，按环境显式开启；
+     * B/C 常在内网，因此默认允许私网地址，loopback/link-local/元数据地址默认拒绝。
+     */
+    public static class Relay {
+
+        /** 是否开启 /api/relay；默认关闭，部署时显式开启。 */
+        private boolean enabled = false;
+
+        /** 链最多多少跳（含根），默认 16。 */
+        private int maxHops = 16;
+
+        /** X-Relay-Chain 原始 header 最大字节数。 */
+        private int maxChainHeaderBytes = 16 * 1024;
+
+        /** X-Relay-Via 原始 header 最大字节数。 */
+        private int maxViaHeaderBytes = 8 * 1024;
+
+        /** 连接下游目标的超时（毫秒）。 */
+        private int connectTimeoutMs = 3_000;
+
+        /** 普通 JSON 请求超时（毫秒）。 */
+        private int requestTimeoutMs = 20_000;
+
+        /** 上传/下载等流式请求超时（毫秒）。 */
+        private int uploadTimeoutMs = 180_000;
+
+        /** 是否允许转发到 RFC1918 私网地址（B 常在内网）。 */
+        private boolean allowPrivateNetwork = true;
+
+        /** 是否允许 loopback；默认拒绝，避免 SSRF。 */
+        private boolean allowLoopback = false;
+
+        /** 非空时只允许这些 host（精确匹配 host 或 host:port）。 */
+        private List<String> allowedHosts = new ArrayList<>();
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getMaxHops() {
+            return maxHops;
+        }
+
+        public void setMaxHops(int maxHops) {
+            this.maxHops = maxHops;
+        }
+
+        public int getMaxChainHeaderBytes() {
+            return maxChainHeaderBytes;
+        }
+
+        public void setMaxChainHeaderBytes(int maxChainHeaderBytes) {
+            this.maxChainHeaderBytes = maxChainHeaderBytes;
+        }
+
+        public int getMaxViaHeaderBytes() {
+            return maxViaHeaderBytes;
+        }
+
+        public void setMaxViaHeaderBytes(int maxViaHeaderBytes) {
+            this.maxViaHeaderBytes = maxViaHeaderBytes;
+        }
+
+        public int getConnectTimeoutMs() {
+            return connectTimeoutMs;
+        }
+
+        public void setConnectTimeoutMs(int connectTimeoutMs) {
+            this.connectTimeoutMs = connectTimeoutMs;
+        }
+
+        public int getRequestTimeoutMs() {
+            return requestTimeoutMs;
+        }
+
+        public void setRequestTimeoutMs(int requestTimeoutMs) {
+            this.requestTimeoutMs = requestTimeoutMs;
+        }
+
+        public int getUploadTimeoutMs() {
+            return uploadTimeoutMs;
+        }
+
+        public void setUploadTimeoutMs(int uploadTimeoutMs) {
+            this.uploadTimeoutMs = uploadTimeoutMs;
+        }
+
+        public boolean isAllowPrivateNetwork() {
+            return allowPrivateNetwork;
+        }
+
+        public void setAllowPrivateNetwork(boolean allowPrivateNetwork) {
+            this.allowPrivateNetwork = allowPrivateNetwork;
+        }
+
+        public boolean isAllowLoopback() {
+            return allowLoopback;
+        }
+
+        public void setAllowLoopback(boolean allowLoopback) {
+            this.allowLoopback = allowLoopback;
+        }
+
+        public List<String> getAllowedHosts() {
+            return allowedHosts;
+        }
+
+        public void setAllowedHosts(List<String> allowedHosts) {
+            this.allowedHosts = allowedHosts == null ? new ArrayList<>() : allowedHosts;
         }
     }
 

@@ -101,6 +101,24 @@ app:
     timeout-seconds: 10
     max-output-bytes: 262144
     max-sessions: 50
+  relay:
+    # 多级转发（/api/relay）总开关：默认关闭，作为中转节点的环境按需开启。
+    enabled: false
+    # 链最多多少跳（含根），防滥用；产品层不设限。
+    max-hops: 16
+    # X-Relay-Chain / X-Relay-Via 原始 header 最大字节数（Base64URL 字符串长度）。
+    max-chain-header-bytes: 16384
+    max-via-header-bytes: 8192
+    # 连接下游超时 / 普通请求超时 / 上传等流式请求超时（毫秒）。
+    connect-timeout-ms: 3000
+    request-timeout-ms: 20000
+    upload-timeout-ms: 180000
+    # 是否允许转发到 RFC1918 私网地址；B 常在内网，默认允许。
+    allow-private-network: true
+    # 是否允许 loopback；默认拒绝，避免 SSRF。
+    allow-loopback: false
+    # 非空时只允许这些 host（精确匹配 host 或 host:port）。
+    allowed-hosts: []
 
 logging:
   level:

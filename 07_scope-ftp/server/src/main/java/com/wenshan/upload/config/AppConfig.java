@@ -8,6 +8,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.net.http.HttpClient;
 
 /**
  * 通用 Bean 定义。
@@ -19,6 +21,19 @@ public class AppConfig {
     @Bean
     public Clock clock() {
         return Clock.systemUTC();
+    }
+
+    /**
+     * 转发专用 JDK HttpClient（零新依赖、双向流式）：
+     * 连接超时可配、禁止跟随重定向、固定 HTTP/1.1（下游/nginx 兼容性优先）。
+     */
+    @Bean("relayHttpClient")
+    public HttpClient relayHttpClient(AppProperties properties) {
+        return HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(properties.getRelay().getConnectTimeoutMs()))
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .version(HttpClient.Version.HTTP_1_1)
+                .build();
     }
 
     /**

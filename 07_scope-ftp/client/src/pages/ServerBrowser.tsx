@@ -79,7 +79,9 @@ import type {
   AuditLogItem,
   DirEntry,
   DirList,
+  RelayViaHop,
   SearchEntry,
+  ServerView,
   StorageRoot,
   UploadProgress,
 } from "../types";
@@ -307,6 +309,12 @@ function validateSingleName(raw: string): string | null {
 export interface ServerBrowserProps {
   configured: boolean;
   serverName?: string;
+  /** 从根到当前目标的名称链（转发目标时形如 ["A","B"]）。 */
+  chainPath?: string[];
+  /** 本地全部服务器（审计来源链按 appKey/url 映射为可点击节点）。 */
+  servers?: ServerView[];
+  /** 切换 active 服务器（点击审计来源链 / 转发链）。 */
+  onSelectServer?: (id: string) => void;
   /** 当前存储根 id（task-16）；null 表示旧单根服务端的默认根。 */
   rootId: string | null;
   /** 当前存储根名称，用于面包屑首段。 */
@@ -338,6 +346,9 @@ export function joinRootPath(
 export default function ServerBrowser({
   configured,
   serverName,
+  chainPath,
+  servers,
+  onSelectServer,
   rootId,
   rootName,
   rootPath,
@@ -1656,6 +1667,40 @@ export default function ServerBrowser({
     }),
   ];
 
+  /** 转发链前缀（不含当前目标）：B 显示「A」，C 显示「A → B」。 */
+  const relayChainLabel =
+    chainPath && chainPath.length > 1 ? chainPath.slice(0, -1).join(" → ") : "";
+
+  /** 审计「来源/转发链」：按 appKey（其次 url）映射本地服务器，找到则可点击切换。 */
+  const relayViaNode = (via?: RelayViaHop[]) => {
+    if (!via || via.length === 0) return "-";
+    return via.map((hop, index) => {
+      const local =
+        servers?.find(
+          (item) =>
+            item.effectiveAppKey === hop.appKey || item.appKey === hop.appKey,
+        ) ?? servers?.find((item) => item.serverUrl === hop.url);
+      const node = local ? (
+        <Button
+          type="link"
+          size="small"
+          onClick={() => onSelectServer?.(local.id)}
+          data-testid="audit-relay-via"
+        >
+          {hop.name}
+        </Button>
+      ) : (
+        <Text>{hop.name}</Text>
+      );
+      return (
+        <span key={`${hop.appKey}-${index}`}>
+          {index > 0 && " → "}
+          {node}
+        </span>
+      );
+    });
+  };
+
   const columns: ColumnsType<DirEntry> = [
     {
       title: "名称",
@@ -1809,6 +1854,19 @@ export default function ServerBrowser({
   return (
     <div className="browser-shell">
       <Card className="page-card browser-card">
+        {serverName && (
+          <div
+            className="browser-server-title"
+            data-testid="browser-server-title"
+          >
+            <Text strong>{serverName}</Text>
+            {relayChainLabel && (
+              <Text type="secondary" className="browser-server-relay">
+                （经 {relayChainLabel} 转发）
+              </Text>
+            )}
+          </div>
+        )}
         <div className="browser-toolbar" data-testid="browser-toolbar">
           <div className="browser-path" data-testid="browser-path">
             <FolderOutlined className="browser-path-icon" />
@@ -2246,6 +2304,7 @@ export default function ServerBrowser({
             {serverName && (
               <Text type="secondary" className="audit-drawer-server">
                 · {serverName}
+                {relayChainLabel && `（经 ${relayChainLabel} 转发）`}
               </Text>
             )}
           </Space>
@@ -2454,6 +2513,12 @@ export default function ServerBrowser({
                       </Text>
                     </Space>
                   ),
+                },
+                {
+                  key: "relayVia",
+                  label: "来源/转发链",
+                  span: 2,
+                  children: relayViaNode(auditDetail.relayVia),
                 },
                 {
                   key: "method",

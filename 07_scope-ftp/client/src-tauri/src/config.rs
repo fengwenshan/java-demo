@@ -1,15 +1,26 @@
 //! 本地配置读写：`app_config_dir()/config.json`，权限 0600。
 //!
-//! 配置为 v2 多服务器格式：
+//! 配置为 v3 多服务器树形格式（转发链）：
 //!
 //! ```json
 //! {
+//!   "configVersion": 3,
 //!   "activeServerId": "uuid",
 //!   "servers": [
 //!     {
 //!       "id": "uuid",
+//!       "kind": "direct",
 //!       "name": "开发环境",
 //!       "serverUrl": "http://127.0.0.1:8080",
+//!       "deviceId": "uuid",
+//!       "deviceName": "我的 MacBook"
+//!     },
+//!     {
+//!       "id": "uuid",
+//!       "kind": "relay",
+//!       "parentId": "uuid",
+//!       "name": "B",
+//!       "serverUrl": "http://10.0.0.5:8080",
 //!       "deviceId": "uuid",
 //!       "deviceName": "我的 MacBook"
 //!     }
@@ -18,8 +29,10 @@
 //! ```
 //!
 //! - 每台服务器有独立的 `id` / `deviceId` / `deviceName`；
-//! - AppKey / AppSecret 默认内置（见 [`crate::builtin`]）；每台服务器可选自定义，secret 落盘 0600、不返回前端；
-//! - 旧版单配置 `{serverUrl, deviceId, deviceName}` 在读取时自动迁移为 v2。
+//! - `kind=direct` 是直连服务器，`kind=relay` 的 `parentId` 指向上一跳，形成 `A → B → C` 的树；
+//! - AppKey / AppSecret 默认内置（见 [`crate::builtin`]）；relay 必须显式填写，不回退内置值；
+//! - secret 落盘 0600、不返回前端；
+//! - 旧版单配置（v1）与 v2 平铺列表在读取时自动迁移为 v3（全部按 direct 处理）。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,6 +50,26 @@ pub const DEFAULT_DEVICE_NAME: &str = "我的设备";
 
 /// 迁移旧配置 / 首次启动时生成的服务器名称。
 pub const DEFAULT_SERVER_NAME: &str = "默认服务器";
+
+/// 当前配置版本：v3 引入 `kind` / `parentId` 树形转发链。
+pub const CONFIG_VERSION: u32 = 3;
+
+/// 转发链客户端安全上限（防止异常配置导致死循环；产品层不设层级限制）。
+const MAX_CHAIN_HOPS: usize = 64;
+
+/// 服务器类型：直连（direct）或转发目标（relay）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerKind {
+    Direct,
+    Relay,
+}
+
+impl Default for ServerKind {
+    fn default() -> Self {
+        Self::Direct
+    }
+}
 
 /// 一台服务器的配置：每台服务器拥有独立的设备身份。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,10 +91,17 @@ pub struct ServerProfile {
     /// 自定义 AppSecret；空串表示使用内置默认值。落盘权限 0600，绝不返回前端。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app_secret: String,
+    /// 服务器类型：direct（直连）或 relay（通过上一跳转发访问）。
+    /// 缺省 direct，兼容 v2 配置。
+    #[serde(default)]
+    pub kind: ServerKind,
+    /// relay 的上一跳服务器 id；direct 为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 impl ServerProfile {
-    /// 新建一台服务器（生成 id 与 deviceId）。
+    /// 新建一台直连服务器（生成 id 与 deviceId）。
     pub fn new(name: &str, server_url: &str, device_name: &str) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -71,11 +111,33 @@ impl ServerProfile {
             device_name: device_name.to_string(),
             app_key: String::new(),
             app_secret: String::new(),
+            kind: ServerKind::Direct,
+            parent_id: None,
         }
     }
 
-    /// 生效的 AppKey：自定义值优先，否则使用内置默认值。
+    /// 新建一台转发目标（生成独立 id 与 deviceId，凭据必填）。
+    pub fn new_relay(
+        name: &str,
+        server_url: &str,
+        device_name: &str,
+        app_key: &str,
+        app_secret: &str,
+        parent_id: &str,
+    ) -> Self {
+        let mut profile = Self::new(name, server_url, device_name);
+        profile.kind = ServerKind::Relay;
+        profile.parent_id = Some(parent_id.to_string());
+        profile.app_key = app_key.to_string();
+        profile.app_secret = app_secret.to_string();
+        profile
+    }
+
+    /// 生效的 AppKey：direct 自定义值优先，否则使用内置默认值；relay 必须显式填写。
     pub fn effective_app_key(&self) -> &str {
+        if self.kind == ServerKind::Relay {
+            return self.app_key.trim();
+        }
         let custom = self.app_key.trim();
         if custom.is_empty() {
             builtin::app_key()
@@ -84,8 +146,11 @@ impl ServerProfile {
         }
     }
 
-    /// 生效的 AppSecret：自定义值优先，否则使用内置默认值。
+    /// 生效的 AppSecret：direct 自定义值优先，否则使用内置默认值；relay 必须显式填写。
     pub fn effective_app_secret(&self) -> &str {
+        if self.kind == ServerKind::Relay {
+            return self.app_secret.trim();
+        }
         let custom = self.app_secret.trim();
         if custom.is_empty() {
             builtin::app_secret()
@@ -99,9 +164,15 @@ impl ServerProfile {
         !self.app_secret.trim().is_empty()
     }
 
-    /// 是否已配置：服务器地址非空（内置凭据始终满足）。
+    /// 是否已配置：地址非空；relay 还要求 AppKey / AppSecret 都非空（不回退内置值）。
     pub fn is_configured(&self) -> bool {
-        !self.server_url.trim().is_empty()
+        if self.server_url.trim().is_empty() {
+            return false;
+        }
+        if self.kind == ServerKind::Relay {
+            return !self.app_key.trim().is_empty() && !self.app_secret.trim().is_empty();
+        }
+        true
     }
 
     fn ensure_ids(&mut self) -> bool {
@@ -129,14 +200,24 @@ impl ServerProfile {
             effective_app_key: self.effective_app_key().to_string(),
             has_custom_secret: self.has_custom_secret(),
             configured: self.is_configured(),
+            kind: self.kind,
+            parent_id: self.parent_id.clone(),
+            parent_name: None,
+            chain_path: Vec::new(),
+            chain_hops: Vec::new(),
+            root_id: self.id.clone(),
+            root_name: self.name.clone(),
         }
     }
 }
 
-/// 持久化配置 v2。
+/// 持久化配置 v3（树形转发链）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    /// 配置版本：v2 文件缺省为 0，加载时迁移为 3。
+    #[serde(default)]
+    pub config_version: u32,
     #[serde(default)]
     pub active_server_id: String,
     #[serde(default)]
@@ -159,12 +240,36 @@ pub struct ServerView {
     /// 是否配置了自定义 AppSecret（不返回 secret 值）。
     pub has_custom_secret: bool,
     pub configured: bool,
+    /// 服务器类型：direct / relay。
+    pub kind: ServerKind,
+    /// relay 的上一跳 id。
+    pub parent_id: Option<String>,
+    /// relay 的上一跳名称。
+    pub parent_name: Option<String>,
+    /// 从根到当前服务器的链名称：`["A", "B", "C"]`。
+    pub chain_path: Vec<String>,
+    /// 从根到当前服务器的链（可点击切换）。
+    pub chain_hops: Vec<ChainHop>,
+    /// 链的根（直连服务器）id / 名称。
+    pub root_id: String,
+    pub root_name: String,
 }
 
-/// 返回给前端的配置视图：没有 `appSecret`，`appKey` 为当前服务器生效值，`hasSecret` 恒为 true。
+/// 转发链上的一跳（仅用于前端展示/点击切换）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainHop {
+    pub id: String,
+    pub name: String,
+}
+
+/// 返回给前端的配置视图：没有 `appSecret`，`appKey` 为当前服务器生效值。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigView {
+    pub config_version: u32,
+    /// 当前激活服务器；空配置时为 `null`。
+    pub active_server: Option<ServerView>,
     pub active_server_id: String,
     pub servers: Vec<ServerView>,
     pub app_key: String,
@@ -172,7 +277,7 @@ pub struct ConfigView {
 }
 
 impl AppConfig {
-    /// 当前激活的服务器（加载/规范化后保证存在）。
+    /// 当前激活的服务器（active 无效时回退到第一台；空配置返回 None）。
     pub fn active(&self) -> Option<&ServerProfile> {
         self.servers
             .iter()
@@ -183,7 +288,7 @@ impl AppConfig {
     /// 当前激活的服务器；不存在时返回可展示的中文错误。
     pub fn require_active(&self) -> Result<&ServerProfile, String> {
         self.active()
-            .ok_or_else(|| "尚未配置服务器，请先在「设置」中添加服务器".to_string())
+            .ok_or_else(|| "请先添加服务器，再使用浏览/上传等功能".to_string())
     }
 
     /// 按 id 查找服务器。
@@ -191,19 +296,96 @@ impl AppConfig {
         self.servers.iter().find(|server| server.id == id.trim())
     }
 
-    /// 前端视图：appKey 为当前生效值，不包含 appSecret。
+    /// 解析从根到 `id` 的转发链（顺序 root → target）：
+    /// - 按 `parentId` 回溯并反转；
+    /// - 校验父存在、无环、层级不超过 [`MAX_CHAIN_HOPS`]、根必须是 direct。
+    pub fn resolve_chain(&self, id: &str) -> Result<Vec<&ServerProfile>, String> {
+        let mut chain = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = self
+            .find(id)
+            .ok_or_else(|| "服务器不存在，可能已被删除".to_string())?;
+        loop {
+            if !seen.insert(current.id.clone()) {
+                return Err("转发链存在环，请在设置中修复该服务器".to_string());
+            }
+            chain.push(current);
+            if chain.len() > MAX_CHAIN_HOPS {
+                return Err("转发层级过深，请检查转发目标配置".to_string());
+            }
+            let Some(parent_id) = current.parent_id.as_deref() else {
+                break;
+            };
+            current = self
+                .find(parent_id)
+                .ok_or_else(|| "上级服务器不存在，请先修复配置".to_string())?;
+        }
+        chain.reverse();
+        if chain
+            .first()
+            .map(|server| server.kind != ServerKind::Direct)
+            .unwrap_or(false)
+        {
+            return Err("转发链的根必须是直连服务器".to_string());
+        }
+        Ok(chain)
+    }
+
+    /// 前端视图：appKey 为当前生效值，不包含 appSecret；每台服务器带上链信息。
     pub fn view(&self) -> ConfigView {
+        let mut views = Vec::with_capacity(self.servers.len());
+        for server in &self.servers {
+            let mut view = server.view();
+            match self.resolve_chain(&server.id) {
+                Ok(chain) => {
+                    view.parent_name = server
+                        .parent_id
+                        .as_deref()
+                        .and_then(|parent| self.find(parent))
+                        .map(|parent| parent.name.clone());
+                    view.chain_path = chain.iter().map(|hop| hop.name.clone()).collect();
+                    view.chain_hops = chain
+                        .iter()
+                        .map(|hop| ChainHop {
+                            id: hop.id.clone(),
+                            name: hop.name.clone(),
+                        })
+                        .collect();
+                    view.root_id = chain.first().map(|hop| hop.id.clone()).unwrap_or_default();
+                    view.root_name = chain
+                        .first()
+                        .map(|hop| hop.name.clone())
+                        .unwrap_or_default();
+                    // configured 需要整条链的地址和凭据都有效。
+                    view.configured =
+                        view.configured && chain.iter().all(|hop| hop.is_configured());
+                }
+                Err(_) => {
+                    // 父不存在 / 环 / 层级过深：该服务器标记为未配置，等待用户修复。
+                    view.configured = false;
+                }
+            }
+            views.push(view);
+        }
+        let active = self
+            .active()
+            .and_then(|server| views.iter().find(|view| view.id == server.id).cloned());
         ConfigView {
+            config_version: self.config_version,
+            active_server: active,
             active_server_id: self
                 .active()
                 .map(|server| server.id.clone())
                 .unwrap_or_default(),
-            servers: self.servers.iter().map(ServerProfile::view).collect(),
+            servers: views,
             app_key: self
                 .active()
                 .map(|server| server.effective_app_key().to_string())
-                .unwrap_or_else(|| builtin::app_key().to_string()),
-            has_secret: true,
+                .unwrap_or_default(),
+            has_secret: self
+                .active()
+                .map(|server| !server.effective_app_secret().trim().is_empty())
+                .unwrap_or(false),
         }
     }
 
@@ -259,6 +441,9 @@ impl AppConfig {
                 .iter_mut()
                 .find(|server| server.id == id)
                 .ok_or_else(|| "服务器不存在，可能已被删除".to_string())?;
+            if server.kind != ServerKind::Direct {
+                return Err("该服务器是转发目标，请通过转发目标设置保存".to_string());
+            }
             server.name = name;
             server.server_url = server_url;
             server.device_name = device_name;
@@ -286,25 +471,137 @@ impl AppConfig {
         Ok(server)
     }
 
-    /// 删除一台服务器：至少保留一台；删除 active 后自动切到其它服务器。
-    pub fn delete_server(&mut self, id: &str) -> Result<(), String> {
+    /// 新建 / 编辑一个转发目标（relay）：
+    /// - `id == None`：新建（生成 id 与 deviceId），并自动设为 active；
+    /// - `id == Some`：编辑，保留原 id 与 deviceId；
+    /// - `app_secret == None` 表示沿用已保存的 secret；新建或原有 secret 为空时必填；
+    /// - 校验上级服务器存在、凭据非空、不会形成环；失败时回滚到调用前的配置。
+    pub fn save_relay(
+        &mut self,
+        id: Option<&str>,
+        parent_id: &str,
+        name: &str,
+        server_url: &str,
+        device_name: &str,
+        app_key: &str,
+        app_secret: Option<&str>,
+    ) -> Result<ServerProfile, String> {
+        let snapshot = self.clone();
+        let parent = self
+            .find(parent_id)
+            .ok_or_else(|| "上级服务器不存在".to_string())?;
+        if parent.id.is_empty() {
+            return Err("上级服务器无效".to_string());
+        }
+        let parent_id = parent.id.clone();
+        let name = normalize_server_name(name)?;
+        let server_url = normalize_server_url(server_url)?;
+        if server_url.is_empty() {
+            return Err("服务器地址不能为空".to_string());
+        }
+        let device_name = normalize_device_name(device_name)?;
+        let app_key = normalize_credential(app_key, "AppKey", 128)?;
+        if app_key.is_empty() {
+            return Err("转发目标 AppKey 必填".to_string());
+        }
+        let app_secret = match app_secret {
+            Some(value) => Some(normalize_credential(value, "AppSecret", 256)?),
+            None => None,
+        };
+
+        let mut relay = if let Some(id) = id.map(str::trim).filter(|value| !value.is_empty()) {
+            let server = self
+                .servers
+                .iter()
+                .find(|server| server.id == id)
+                .ok_or_else(|| "服务器不存在，可能已被删除".to_string())?
+                .clone();
+            if server.kind != ServerKind::Relay {
+                return Err("该服务器不是转发目标".to_string());
+            }
+            server
+        } else {
+            ServerProfile::new_relay(
+                &name,
+                &server_url,
+                &device_name,
+                &app_key,
+                app_secret.as_deref().unwrap_or_default(),
+                &parent_id,
+            )
+        };
+        relay.kind = ServerKind::Relay;
+        relay.parent_id = Some(parent_id.clone());
+        relay.name = name;
+        relay.server_url = server_url;
+        relay.device_name = device_name;
+        relay.app_key = app_key;
+        if let Some(secret) = app_secret {
+            if !secret.is_empty() {
+                relay.app_secret = secret;
+            }
+        }
+        if relay.app_secret.trim().is_empty() {
+            return Err("转发目标 AppSecret 必填".to_string());
+        }
+        relay.ensure_ids();
+
+        if let Some(index) = self.servers.iter().position(|server| server.id == relay.id) {
+            self.servers[index] = relay.clone();
+        } else {
+            self.servers.push(relay.clone());
+            self.active_server_id = relay.id.clone();
+        }
+        // 用 resolve_chain 验证父存在 / 环 / 根类型；失败则回滚到调用前的克隆。
+        if let Err(error) = self.resolve_chain(&relay.id) {
+            *self = snapshot;
+            return Err(error);
+        }
+        Ok(relay)
+    }
+
+    /// 删除一台服务器及其所有后代（级联）：
+    /// - 返回被删除的所有 id（含自身与子树），供调用方清理续传状态；
+    /// - 允许删到空配置（不再保留「至少一台」保护）；
+    /// - active 被删时回退到父级，没有父级则回退到剩余的直连服务器/第一台，空则清空。
+    pub fn delete_server(&mut self, id: &str) -> Result<Vec<String>, String> {
         let id = id.trim();
         if id.is_empty() {
             return Err("缺少要删除的服务器 id".to_string());
         }
-        if self.servers.len() <= 1 {
-            return Err("至少需要保留一台服务器".to_string());
+        if self.find(id).is_none() {
+            return Err("服务器不存在，可能已被删除".to_string());
         }
-        let position = self
-            .servers
-            .iter()
-            .position(|server| server.id == id)
-            .ok_or_else(|| "服务器不存在，可能已被删除".to_string())?;
-        self.servers.remove(position);
-        if self.active_server_id == id {
-            self.active_server_id = self.servers[0].id.clone();
+        let mut doomed = std::collections::HashSet::new();
+        let mut stack = vec![id.to_string()];
+        while let Some(current) = stack.pop() {
+            if !doomed.insert(current.clone()) {
+                continue;
+            }
+            for server in &self.servers {
+                if server.parent_id.as_deref() == Some(current.as_str()) {
+                    stack.push(server.id.clone());
+                }
+            }
         }
-        Ok(())
+        let fallback = self
+            .find(id)
+            .and_then(|server| server.parent_id.clone())
+            .filter(|parent| !doomed.contains(parent))
+            .or_else(|| {
+                self.servers
+                    .iter()
+                    .find(|server| {
+                        server.kind == ServerKind::Direct && !doomed.contains(&server.id)
+                    })
+                    .map(|server| server.id.clone())
+            })
+            .unwrap_or_default();
+        self.servers.retain(|server| !doomed.contains(&server.id));
+        if doomed.contains(&self.active_server_id) {
+            self.active_server_id = fallback;
+        }
+        Ok(doomed.into_iter().collect())
     }
 
     /// 切换当前服务器。
@@ -317,22 +614,26 @@ impl AppConfig {
         Ok(())
     }
 
-    /// 补齐/修复配置：默认服务器、缺失的 id/deviceId、空地址、active 指向。
+    /// 补齐/修复配置：缺失的 id/deviceId、空地址、parent 清洗、active 指向、configVersion。
+    ///
+    /// 注意：**不再自动补默认服务器**——`servers=[]` 时保持空配置，否则删完重启又会
+    /// 自动出现一台默认服务器。首次安装的默认服务器由 [`load_or_init`] 显式生成。
+    ///
     /// 返回是否发生了修改（需要落盘）。
     fn normalize(&mut self) -> bool {
         let mut changed = false;
 
-        if self.servers.is_empty() {
-            self.servers.push(ServerProfile::new(
-                DEFAULT_SERVER_NAME,
-                builtin::default_server_url(),
-                DEFAULT_DEVICE_NAME,
-            ));
-            changed = true;
-        }
-
         for (index, server) in self.servers.iter_mut().enumerate() {
             if server.ensure_ids() {
+                changed = true;
+            }
+            // 清洗 parentId：不能指向自己；direct 不允许有 parent。
+            if server.parent_id.as_deref() == Some(server.id.as_str()) {
+                server.parent_id = None;
+                changed = true;
+            }
+            if server.kind == ServerKind::Direct && server.parent_id.is_some() {
+                server.parent_id = None;
                 changed = true;
             }
             let trimmed_url = server.server_url.trim().trim_end_matches('/').to_string();
@@ -340,7 +641,7 @@ impl AppConfig {
                 server.server_url = trimmed_url;
                 changed = true;
             }
-            if server.server_url.is_empty() {
+            if server.server_url.is_empty() && server.kind == ServerKind::Direct {
                 server.server_url = builtin::default_server_url().to_string();
                 changed = true;
             }
@@ -376,12 +677,27 @@ impl AppConfig {
             }
         }
 
-        let active_valid = self
+        if self.servers.is_empty() {
+            if !self.active_server_id.is_empty() {
+                self.active_server_id.clear();
+                changed = true;
+            }
+        } else if !self
             .servers
             .iter()
-            .any(|server| server.id == self.active_server_id);
-        if !active_valid {
-            self.active_server_id = self.servers[0].id.clone();
+            .any(|server| server.id == self.active_server_id)
+        {
+            self.active_server_id = self
+                .servers
+                .iter()
+                .find(|server| server.kind == ServerKind::Direct)
+                .map(|server| server.id.clone())
+                .unwrap_or_else(|| self.servers[0].id.clone());
+            changed = true;
+        }
+
+        if self.config_version < CONFIG_VERSION {
+            self.config_version = CONFIG_VERSION;
             changed = true;
         }
 
@@ -397,16 +713,27 @@ pub fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("无法定位应用配置目录：{e}"))
 }
 
-/// 默认配置（内存态）：一台内置默认地址的服务器 + 新 deviceId。
+/// 默认配置（内存态 / 首次安装）：显式创建一台内置默认地址的 direct 服务器 + 新 deviceId。
 ///
-/// 配置目录不可写等情况下作为内存兜底，保证界面仍可用（保存时会给出明确错误）。
+/// 注意：只有「配置文件不存在 / 内容为空」或内存兜底时才调用本函数；
+/// [`AppConfig::normalize`] 不会自动补默认服务器，空配置会保持为空。
 pub fn default_config() -> AppConfig {
-    let mut config = AppConfig::default();
+    let mut config = AppConfig {
+        config_version: CONFIG_VERSION,
+        ..AppConfig::default()
+    };
+    let server = ServerProfile::new(
+        DEFAULT_SERVER_NAME,
+        builtin::default_server_url(),
+        DEFAULT_DEVICE_NAME,
+    );
+    config.active_server_id = server.id.clone();
+    config.servers.push(server);
     config.normalize();
     config
 }
 
-/// 从旧版单服务器配置（v1）迁移。
+/// 从旧版单服务器配置（v1）迁移为 v3 单服务器配置。
 ///
 /// 旧格式：`{serverUrl, deviceId, deviceName, [appKey], [appSecret]}`。
 fn migrate_v1(raw: &Value) -> AppConfig {
@@ -426,26 +753,34 @@ fn migrate_v1(raw: &Value) -> AppConfig {
         device_name: text("deviceName"),
         app_key: String::new(),
         app_secret: String::new(),
+        kind: ServerKind::Direct,
+        parent_id: None,
     };
     profile.ensure_ids();
     AppConfig {
+        config_version: CONFIG_VERSION,
         active_server_id: profile.id.clone(),
         servers: vec![profile],
     }
 }
 
 /// 读取配置；必要时补齐并落盘（0600）：
-/// - 文件不存在 / 内容为空：创建默认服务器（内置默认地址 + 新 deviceId）
-/// - 旧版单服务器格式：迁移为 v2 并持久化（同时清洗旧的 appKey / appSecret 字段）
-/// - v2：补齐缺失的 id/deviceId、空 serverUrl、无效 activeServerId
+/// - 文件不存在 / 内容为空（首次安装）：创建默认 direct 服务器；
+/// - 旧版单服务器格式（v1）：迁移为 v3 并持久化（同时清洗旧的 appKey / appSecret 字段）；
+/// - v2 平铺列表（无 `configVersion`）：补 `configVersion=3`，所有服务器 `kind=direct`、
+///   `parentId=null`，迁移后立即持久化；
+/// - v3：补齐缺失的 id/deviceId、空 serverUrl、无效 activeServerId；
+/// - 配置文件存在但 `servers=[]`：保持空配置，**不自动补默认服务器**。
 pub fn load_or_init(path: &Path) -> Result<AppConfig, String> {
     let existed = path.exists();
     let mut needs_persist = !existed;
-    let mut config = AppConfig::default();
+    let mut config;
 
     if existed {
         let content = std::fs::read_to_string(path).map_err(|e| format!("读取配置失败：{e}"))?;
         if content.trim().is_empty() {
+            // 空文件视为首次安装：生成默认 direct 服务器。
+            config = default_config();
             needs_persist = true;
         } else {
             let raw: Value =
@@ -455,14 +790,26 @@ pub fn load_or_init(path: &Path) -> Result<AppConfig, String> {
                 needs_persist = true;
             }
             if raw.get("servers").map(Value::is_array).unwrap_or(false) {
-                config = serde_json::from_value(raw)
-                    .map_err(|e| format!("配置文件格式错误：{e}"))?;
+                config =
+                    serde_json::from_value(raw).map_err(|e| format!("配置文件格式错误：{e}"))?;
+                if config.config_version < CONFIG_VERSION {
+                    // v2 → v3：所有服务器按直连处理，parent 清空；迁移后立即持久化。
+                    config.config_version = CONFIG_VERSION;
+                    for server in &mut config.servers {
+                        server.kind = ServerKind::Direct;
+                        server.parent_id = None;
+                    }
+                    needs_persist = true;
+                }
             } else {
-                // v1 单服务器配置 → v2。
+                // v1 单服务器配置 → v3。
                 config = migrate_v1(&raw);
                 needs_persist = true;
             }
         }
+    } else {
+        config = default_config();
+        needs_persist = true;
     }
 
     if config.normalize() {
@@ -525,7 +872,10 @@ pub fn validate_required_credentials(
     app_key: Option<&str>,
     app_secret: Option<&str>,
 ) -> Result<(), String> {
-    let is_new = id.map(str::trim).filter(|value| !value.is_empty()).is_none();
+    let is_new = id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none();
     let missing_app_key = app_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -685,7 +1035,10 @@ mod tests {
 
         let again = load_or_init(&path).unwrap();
         assert_eq!(again.active_server_id, config.active_server_id);
-        assert_eq!(again.servers[0].device_id, server.device_id, "deviceId 必须持久化");
+        assert_eq!(
+            again.servers[0].device_id, server.device_id,
+            "deviceId 必须持久化"
+        );
 
         // 不能落盘凭据
         let content = std::fs::read_to_string(&path).unwrap();
@@ -697,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_single_server_config_is_migrated_to_v2() {
+    fn legacy_single_server_config_is_migrated_to_v3() {
         let dir = temp_dir();
         let path = dir.join(CONFIG_FILE_NAME);
         write_file(
@@ -713,16 +1066,20 @@ mod tests {
 
         let config = load_or_init(&path).unwrap();
         assert_eq!(config.servers.len(), 1, "旧配置应迁移为一台服务器");
+        assert_eq!(config.config_version, CONFIG_VERSION);
         let server = config.active().unwrap();
         assert_eq!(server.name, DEFAULT_SERVER_NAME);
         assert_eq!(server.server_url, "http://127.0.0.1:9999");
         assert_eq!(server.device_id, "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
         assert_eq!(server.device_name, "旧设备");
+        assert_eq!(server.kind, ServerKind::Direct);
+        assert!(server.parent_id.is_none());
         assert!(!server.id.is_empty());
         assert_eq!(config.active_server_id, server.id);
 
-        // 迁移后必须写成 v2 结构，且清洗凭据字段
+        // 迁移后必须写成 v3 结构，且清洗凭据字段
         let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"configVersion\": 3"));
         assert!(content.contains("\"activeServerId\""));
         assert!(content.contains("\"servers\""));
         assert!(!content.contains("legacy-key"));
@@ -807,9 +1164,7 @@ mod tests {
         assert!(config
             .save_server(None, "", "http://127.0.0.1:8080", "设备")
             .is_err());
-        assert!(config
-            .save_server(None, "x", "not-a-url", "设备")
-            .is_err());
+        assert!(config.save_server(None, "x", "not-a-url", "设备").is_err());
         assert!(config
             .save_server(None, "x", "http://127.0.0.1:8080", "")
             .is_err());
@@ -819,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_server_keeps_at_least_one_and_switches_active() {
+    fn delete_server_keeps_remaining_and_switches_active() {
         let dir = temp_dir();
         let path = dir.join(CONFIG_FILE_NAME);
         let mut config = load_or_init(&path).unwrap();
@@ -829,13 +1184,18 @@ mod tests {
             .unwrap();
 
         // 删除 active（第二台）→ 自动切到剩下的第一台
-        config.delete_server(&second.id).unwrap();
+        let deleted = config.delete_server(&second.id).unwrap();
+        assert_eq!(deleted, vec![second.id.clone()]);
         assert_eq!(config.servers.len(), 1);
         assert_eq!(config.active_server_id, first_id);
 
-        // 只剩一台时不允许删除
-        assert!(config.delete_server(&first_id).is_err());
-        assert_eq!(config.servers.len(), 1);
+        // 允许删到空配置；active 清空
+        let deleted = config.delete_server(&first_id).unwrap();
+        assert_eq!(deleted, vec![first_id]);
+        assert!(config.servers.is_empty());
+        assert!(config.active_server_id.is_empty());
+        assert!(config.view().active_server.is_none());
+        assert!(config.require_active().is_err());
         assert!(config.delete_server("不存在的-id").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -929,7 +1289,9 @@ mod tests {
         assert_eq!(server_view.effective_app_key, "my-app");
         assert!(server_view.has_custom_secret);
         assert!(
-            !serde_json::to_string(&view).unwrap().contains("my-secret-0123456789"),
+            !serde_json::to_string(&view)
+                .unwrap()
+                .contains("my-secret-0123456789"),
             "视图不能包含自定义 secret"
         );
 
@@ -999,5 +1361,335 @@ mod tests {
         assert!(validate_required_credentials(Some("s1"), Some("key"), None).is_ok());
         assert!(validate_required_credentials(Some("s1"), Some("key"), Some("  ")).is_err());
         assert!(validate_required_credentials(Some("s1"), Some("key"), Some("secret")).is_ok());
+    }
+
+    #[test]
+    fn v2_config_migrates_to_v3_direct_servers() {
+        let dir = temp_dir();
+        let path = dir.join(CONFIG_FILE_NAME);
+        write_file(
+            &path,
+            r#"{"activeServerId":"a","servers":[{"id":"a","name":"A","serverUrl":"http://a","deviceId":"da","deviceName":"dev","appKey":"ka","appSecret":"sa"}]}"#,
+        );
+        let config = load_or_init(&path).unwrap();
+        assert_eq!(config.config_version, CONFIG_VERSION);
+        assert_eq!(config.servers[0].kind, ServerKind::Direct);
+        assert!(config.servers[0].parent_id.is_none());
+        assert_eq!(config.servers[0].effective_app_key(), "ka");
+
+        // 迁移后立即持久化，写回 configVersion。
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"configVersion\": 3"), "{content}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_cascades_and_allows_empty_config() {
+        let mut config = AppConfig {
+            config_version: 3,
+            active_server_id: "a".into(),
+            servers: vec![],
+        };
+        let a = config.save_server(None, "A", "http://a", "dev").unwrap();
+        let b = config
+            .save_relay(None, &a.id, "B", "http://b", "dev", "kb", Some("sb"))
+            .unwrap();
+        let c = config
+            .save_relay(None, &b.id, "C", "http://c", "dev", "kc", Some("sc"))
+            .unwrap();
+        let deleted = config.delete_server(&a.id).unwrap();
+        let mut deleted_sorted = deleted.clone();
+        deleted_sorted.sort();
+        let mut expected = vec![a.id.clone(), b.id.clone(), c.id.clone()];
+        expected.sort();
+        assert_eq!(deleted_sorted, expected);
+        assert!(config.servers.is_empty());
+        assert!(config.active_server_id.is_empty());
+        assert!(config.view().active_server.is_none());
+        assert!(config.resolve_chain(&c.id).is_err());
+    }
+
+    #[test]
+    fn empty_config_is_not_repopulated_on_reload() {
+        let dir = temp_dir();
+        let path = dir.join(CONFIG_FILE_NAME);
+        write_file(
+            &path,
+            r#"{"configVersion":3,"activeServerId":"","servers":[]}"#,
+        );
+        let config = load_or_init(&path).unwrap();
+        assert!(config.servers.is_empty());
+        assert!(config.active_server_id.is_empty());
+        assert!(config.view().active_server.is_none());
+        let reloaded = load_or_init(&path).unwrap();
+        assert!(reloaded.servers.is_empty());
+        assert!(reloaded.view().active_server.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_chain_returns_root_to_target_order() {
+        let mut config = AppConfig::default();
+        let a = config.save_server(None, "A", "http://a", "dev").unwrap();
+        let b = config
+            .save_relay(None, &a.id, "B", "http://b", "dev", "kb", Some("sb"))
+            .unwrap();
+        let c = config
+            .save_relay(None, &b.id, "C", "http://c", "dev", "kc", Some("sc"))
+            .unwrap();
+
+        let chain = config.resolve_chain(&c.id).unwrap();
+        let names: Vec<&str> = chain.iter().map(|hop| hop.name.as_str()).collect();
+        assert_eq!(names, vec!["A", "B", "C"]);
+        assert_eq!(chain[0].id, a.id);
+        assert_eq!(chain[2].id, c.id);
+
+        let chain = config.resolve_chain(&a.id).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].kind, ServerKind::Direct);
+        assert!(config.resolve_chain("missing").is_err());
+    }
+
+    #[test]
+    fn invalid_parent_self_or_cycle_marks_server_unconfigured() {
+        let mut config = AppConfig::default();
+        let a = config.save_server(None, "A", "http://a", "dev").unwrap();
+        let b = config
+            .save_relay(None, &a.id, "B", "http://b", "dev", "kb", Some("sb"))
+            .unwrap();
+        let c = config
+            .save_relay(None, &b.id, "C", "http://c", "dev", "kc", Some("sc"))
+            .unwrap();
+
+        // 父不存在 → configured=false，不静默改成 direct。
+        config
+            .servers
+            .iter_mut()
+            .find(|server| server.id == b.id)
+            .unwrap()
+            .parent_id = Some("missing-parent".to_string());
+        assert!(config.resolve_chain(&b.id).is_err());
+        assert!(config.resolve_chain(&c.id).is_err());
+        let view = config.view();
+        assert!(
+            !view
+                .servers
+                .iter()
+                .find(|item| item.id == b.id)
+                .unwrap()
+                .configured
+        );
+        assert!(
+            !view
+                .servers
+                .iter()
+                .find(|item| item.id == c.id)
+                .unwrap()
+                .configured
+        );
+        assert_eq!(
+            view.servers
+                .iter()
+                .find(|item| item.id == b.id)
+                .unwrap()
+                .kind,
+            ServerKind::Relay,
+            "父缺失不应把 relay 静默改成 direct"
+        );
+
+        // 环：B → C → B。
+        config
+            .servers
+            .iter_mut()
+            .find(|server| server.id == b.id)
+            .unwrap()
+            .parent_id = Some(c.id.clone());
+        assert!(config.resolve_chain(&b.id).is_err());
+        assert!(config.resolve_chain(&c.id).is_err());
+        assert!(config.resolve_chain(&b.id).unwrap_err().contains("环"));
+
+        // relay 不能作为根。
+        config
+            .servers
+            .iter_mut()
+            .find(|server| server.id == c.id)
+            .unwrap()
+            .parent_id = None;
+        assert!(config.resolve_chain(&c.id).is_err());
+        assert!(
+            !config
+                .view()
+                .servers
+                .iter()
+                .find(|item| item.id == c.id)
+                .unwrap()
+                .configured
+        );
+
+        // 自指 parent 在 normalize 时被清洗。
+        config
+            .servers
+            .iter_mut()
+            .find(|server| server.id == c.id)
+            .unwrap()
+            .parent_id = Some(c.id.clone());
+        let mut reloaded = config.clone();
+        reloaded.normalize();
+        assert!(reloaded.find(&c.id).unwrap().parent_id.is_none());
+    }
+
+    #[test]
+    fn relay_view_exposes_chain_and_never_leaks_secret() {
+        let mut config = AppConfig {
+            config_version: CONFIG_VERSION,
+            ..AppConfig::default()
+        };
+        let a = config.save_server(None, "A", "http://a", "dev").unwrap();
+        let b = config
+            .save_relay(
+                None,
+                &a.id,
+                "B",
+                "http://b",
+                "dev-b",
+                "kb",
+                Some("relay-secret-should-not-leak"),
+            )
+            .unwrap();
+
+        let view = config.view();
+        assert_eq!(view.config_version, CONFIG_VERSION);
+        assert!(view.active_server.is_some());
+        let server = view.servers.iter().find(|item| item.id == b.id).unwrap();
+        assert_eq!(server.kind, ServerKind::Relay);
+        assert_eq!(server.parent_id.as_deref(), Some(a.id.as_str()));
+        assert_eq!(server.parent_name.as_deref(), Some("A"));
+        assert_eq!(server.chain_path, vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(server.chain_hops.len(), 2);
+        assert_eq!(server.chain_hops[0].id, a.id);
+        assert_eq!(server.root_id, a.id);
+        assert_eq!(server.root_name, "A");
+        assert_eq!(server.effective_app_key, "kb");
+        assert!(server.configured);
+
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("relay-secret-should-not-leak"));
+        assert!(!json.contains("appSecret"), "视图不能包含 appSecret 字段");
+
+        // 整条链有效才算 configured：把 A 的地址清空后 B 也不可用。
+        config
+            .servers
+            .iter_mut()
+            .find(|item| item.id == a.id)
+            .unwrap()
+            .server_url = String::new();
+        let view = config.view();
+        assert!(
+            !view
+                .servers
+                .iter()
+                .find(|item| item.id == b.id)
+                .unwrap()
+                .configured
+        );
+    }
+
+    #[test]
+    fn save_relay_validates_credentials_and_preserves_secret() {
+        let mut config = AppConfig::default();
+        let a = config.save_server(None, "A", "http://a", "dev").unwrap();
+
+        // AppKey / AppSecret 必填。
+        assert!(config
+            .save_relay(None, &a.id, "B", "http://b", "dev", "", Some("sb"))
+            .is_err());
+        assert!(config
+            .save_relay(None, &a.id, "B", "http://b", "dev", "kb", Some(""))
+            .is_err());
+        assert!(config
+            .save_relay(
+                None,
+                "missing-parent",
+                "B",
+                "http://b",
+                "dev",
+                "kb",
+                Some("sb")
+            )
+            .is_err());
+        assert_eq!(config.servers.len(), 1);
+
+        let b = config
+            .save_relay(None, &a.id, "B", "http://b", "dev", "kb", Some("sb"))
+            .unwrap();
+        assert_eq!(b.kind, ServerKind::Relay);
+        assert_eq!(b.effective_app_key(), "kb");
+        assert_eq!(b.effective_app_secret(), "sb");
+        assert_eq!(config.active_server_id, b.id, "新建 relay 应自动激活");
+
+        // 编辑时 secret 传 None：保留原 secret；deviceId 不变。
+        let edited = config
+            .save_relay(Some(&b.id), &a.id, "B2", "http://b2", "dev2", "kb2", None)
+            .unwrap();
+        assert_eq!(edited.id, b.id);
+        assert_eq!(edited.device_id, b.device_id);
+        assert_eq!(edited.name, "B2");
+        assert_eq!(edited.server_url, "http://b2");
+        assert_eq!(edited.effective_app_key(), "kb2");
+        assert_eq!(edited.effective_app_secret(), "sb", "None 应保留原 secret");
+
+        // 编辑时可更新 secret。
+        let edited = config
+            .save_relay(
+                Some(&b.id),
+                &a.id,
+                "B2",
+                "http://b2",
+                "dev2",
+                "kb2",
+                Some("sb2"),
+            )
+            .unwrap();
+        assert_eq!(edited.effective_app_secret(), "sb2");
+
+        // 通过 save_server 编辑 relay 应被拒绝，避免把转发目标当成直连改坏。
+        assert!(config
+            .save_server(Some(&b.id), "B2", "http://b2", "dev2")
+            .is_err());
+        // 非 relay 服务器不能用 save_relay 编辑。
+        assert!(config
+            .save_relay(Some(&a.id), &a.id, "A", "http://a", "dev", "ka", Some("sa"))
+            .is_err());
+        // AppSecret 只落盘 0600，不进入视图。
+        assert!(!serde_json::to_string(&config.view())
+            .unwrap()
+            .contains("sb2"));
+    }
+
+    #[test]
+    fn save_relay_rolls_back_on_cycle() {
+        let mut config = AppConfig::default();
+        let a = config.save_server(None, "A", "http://a", "dev").unwrap();
+        let b = config
+            .save_relay(None, &a.id, "B", "http://b", "dev", "kb", Some("sb"))
+            .unwrap();
+        let c = config
+            .save_relay(None, &b.id, "C", "http://c", "dev", "kc", Some("sc"))
+            .unwrap();
+
+        // 把 B 的上级改成自己的子节点 C → 成环，必须回滚。
+        let snapshot = config.clone();
+        let error = config
+            .save_relay(Some(&b.id), &c.id, "B", "http://b", "dev", "kb", None)
+            .unwrap_err();
+        assert!(error.contains("环"), "{error}");
+        assert_eq!(config.servers.len(), snapshot.servers.len());
+        assert_eq!(
+            config.find(&b.id).unwrap().parent_id.as_deref(),
+            Some(a.id.as_str()),
+            "失败后应回滚 parent"
+        );
     }
 }

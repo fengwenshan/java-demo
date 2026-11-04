@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, App as AntdApp, Layout, Spin, Typography } from "antd";
+import { Alert, App as AntdApp, Button, Empty, Layout, Spin, Typography } from "antd";
 
 import {
   errorMessage,
@@ -25,8 +25,12 @@ const { Text } = Typography;
 
 type ViewKey = "browser" | "settings";
 
-/** 设置页当前编辑的对象：新建 / 编辑某台服务器。 */
-type SettingsTarget = { kind: "new" } | { kind: "edit"; id: string } | null;
+/** 设置页当前编辑的对象：新建 / 编辑某台服务器 / 在父服务器下新建转发目标。 */
+type SettingsTarget =
+  | { kind: "new" }
+  | { kind: "edit"; id: string }
+  | { kind: "newRelay"; parentId: string }
+  | null;
 
 export default function App() {
   const { message, modal } = AntdApp.useApp();
@@ -49,8 +53,8 @@ export default function App() {
   const rootByServerRef = useRef<Record<string, string>>({});
 
   const activeServer: ServerView | null =
+    config?.activeServer ??
     config?.servers.find((server) => server.id === config.activeServerId) ??
-    config?.servers[0] ??
     null;
   const configured = Boolean(
     activeServer?.configured && config?.appKey && config?.hasSecret,
@@ -65,8 +69,21 @@ export default function App() {
         null)
       : null;
 
+  /** 新建转发目标时的父服务器（A/B/C）。 */
+  const relayParent: ServerView | null =
+    settingsTarget?.kind === "newRelay"
+      ? (config?.servers.find(
+          (server) => server.id === settingsTarget.parentId,
+        ) ?? null)
+      : null;
+
   /** 拉取当前服务器的存储根；旧服务端没有该接口时静默回退单根模式。 */
-  const refreshRoots = useCallback(async (serverId: string) => {
+  const refreshRoots = useCallback(async (serverId: string | null) => {
+    if (!serverId) {
+      setRoots([]);
+      setActiveRootId(null);
+      return;
+    }
     try {
       const data = await listStorageRoots();
       setRoots(data.roots);
@@ -90,10 +107,21 @@ export default function App() {
       return;
     }
     const server =
+      next.activeServer ??
       next.servers.find((item) => item.id === next.activeServerId) ??
-      next.servers[0] ??
       null;
-    if (!server || !server.configured || !next.appKey || !next.hasSecret) {
+    if (!server) {
+      // 空配置：还没有服务器；右侧显示空态并引导添加。
+      setVerify(null);
+      setRoots([]);
+      setActiveRootId(null);
+      setConnection({
+        status: "unconfigured",
+        message: "还没有服务器，请先添加",
+      });
+      return;
+    }
+    if (!server.configured || !next.appKey || !next.hasSecret) {
       setVerify(null);
       setRoots([]);
       setActiveRootId(null);
@@ -221,6 +249,21 @@ export default function App() {
     });
   }, [withLeaveGuard]);
 
+  /** 在父服务器下新建转发目标（父必须存在；连接校验在设置页内完成）。 */
+  const handleAddRelay = useCallback(
+    (parentId: string) => {
+      if (!config?.servers.some((server) => server.id === parentId)) {
+        message.warning("上级服务器不存在，请刷新后重试");
+        return;
+      }
+      withLeaveGuard(() => {
+        setSettingsTarget({ kind: "newRelay", parentId });
+        setView("settings");
+      });
+    },
+    [config?.servers, message, withLeaveGuard],
+  );
+
   const handleEditServer = useCallback(
     (id: string) => {
       withLeaveGuard(() => {
@@ -245,7 +288,12 @@ export default function App() {
     async (next: ConfigView, meta: { isNew: boolean }) => {
       setConfig(next);
       if (meta.isNew) {
-        setSettingsTarget({ kind: "edit", id: next.activeServerId });
+        // 以后端返回的 activeServer 为准（空配置时可能为 null），不要自己兜底。
+        const focus =
+          next.activeServer ??
+          next.servers.find((server) => server.id === next.activeServerId) ??
+          null;
+        setSettingsTarget(focus ? { kind: "edit", id: focus.id } : null);
       }
       await refreshConnection(next);
     },
@@ -303,6 +351,7 @@ export default function App() {
           onSelectRoot={handleSelectRoot}
           onSelectServer={handleSelectServer}
           onAddServer={handleAddServer}
+          onAddRelay={handleAddRelay}
           onEditServer={handleEditServer}
           onOpenSettings={handleOpenSettings}
         />
@@ -326,32 +375,54 @@ export default function App() {
               <Text type="secondary">正在加载配置…</Text>
             </div>
           ) : view === "browser" ? (
-            <ServerBrowser
-              key={`${activeServer?.id ?? "unconfigured"}:${activeRoot?.id ?? "default"}`}
-              configured={configured}
-              serverName={activeServer?.name}
-              rootId={activeRoot?.id ?? null}
-              rootName={activeRoot?.name ?? null}
-              rootPath={activeRoot?.path ?? null}
-              roots={roots}
-              onGoSettings={handleOpenSettings}
-            />
+            // 空配置（没有任何服务器 / 没有 active）时右侧显示空态；有 active 才渲染浏览器。
+            config && !config.activeServer ? (
+              <div className="empty-config" data-testid="empty-config">
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="还没有服务器"
+                >
+                  <Button type="primary" onClick={handleAddServer}>
+                    添加服务器
+                  </Button>
+                </Empty>
+              </div>
+            ) : (
+              <ServerBrowser
+                key={`${activeServer?.id ?? "unconfigured"}:${activeRoot?.id ?? "default"}`}
+                configured={configured}
+                serverName={activeServer?.name}
+                chainPath={activeServer?.chainPath}
+                servers={config?.servers}
+                onSelectServer={handleSelectServer}
+                rootId={activeRoot?.id ?? null}
+                rootName={activeRoot?.name ?? null}
+                rootPath={activeRoot?.path ?? null}
+                roots={roots}
+                onGoSettings={handleOpenSettings}
+              />
+            )
           ) : (
             <>
               <SettingsPage
                 config={config}
                 server={editingServer}
-                isNew={settingsTarget?.kind === "new"}
+                isNew={
+                  settingsTarget?.kind === "new" ||
+                  settingsTarget?.kind === "newRelay"
+                }
+                relayParent={relayParent}
                 verify={verify}
                 connection={connection}
                 browserMode={browserMode}
                 roots={roots}
-                canDelete={(config?.servers.length ?? 0) > 1}
                 onSaved={handleConfigSaved}
                 onDeleted={handleServerDeleted}
                 onVerified={handleVerified}
                 onRecheck={handleRecheck}
                 onDirtyChange={setSettingsDirty}
+                onAddRelay={handleAddRelay}
+                onSelectServer={handleSelectServer}
               />
             </>
           )}

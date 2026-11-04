@@ -95,10 +95,74 @@ export async function saveServer(args: SaveServerArgs): Promise<ConfigView> {
   });
 }
 
-/** 删除一台服务器（至少保留一台）；删除当前服务器后自动切换。 */
+/** 删除一台服务器（含其下所有转发目标的本地配置与续传状态）。 */
 export async function deleteServer(id: string): Promise<ConfigView> {
   requireDesktop();
   return invoke<ConfigView>("delete_server", { id });
+}
+
+export interface SaveRelayArgs {
+  /** 不传/null 表示新建；传 id 表示编辑。 */
+  id: string | null;
+  /** 上级服务器 id（转发目标挂在它下面）。 */
+  parentId: string;
+  name: string;
+  /** 目标中转服务器地址（父服务器可访问）。 */
+  serverUrl: string;
+  deviceName: string;
+  /** 转发目标自己的 AppKey（必填）。 */
+  appKey: string;
+  /** 转发目标自己的 AppSecret；编辑时 null 表示保留原值，新建时必填。 */
+  appSecret: string | null;
+}
+
+/**
+ * 新建或编辑一个转发目标（转发链 v3）。
+ *
+ * 新建不会自动切换 active；编辑保存后需要重新验证连接。
+ */
+export async function saveRelay(args: SaveRelayArgs): Promise<ConfigView> {
+  requireDesktop();
+  return invoke<ConfigView>("save_relay", {
+    id: args.id,
+    parentId: args.parentId,
+    name: args.name,
+    serverUrl: args.serverUrl,
+    deviceName: args.deviceName,
+    appKey: args.appKey,
+    appSecret: args.appSecret,
+  });
+}
+
+export interface VerifyRelayPreviewArgs {
+  /** 上级服务器 id（父链必须已在本地配置中）。 */
+  parentId: string;
+  /** 编辑已保存的转发目标时传其 id，用于复用原 secret。 */
+  existingId: string | null;
+  name: string;
+  serverUrl: string;
+  deviceName: string;
+  appKey: string;
+  appSecret: string | null;
+}
+
+/**
+ * 保存转发目标前，用「父链 + 待保存的目标」整条链做预览验证；
+ * 不落盘、不切换配置，验证成功后再调用 `saveRelay`。
+ */
+export async function verifyRelayPreview(
+  args: VerifyRelayPreviewArgs,
+): Promise<VerifyResult> {
+  requireDesktop();
+  return invoke<VerifyResult>("verify_relay_preview", {
+    parentId: args.parentId,
+    existingId: args.existingId,
+    name: args.name,
+    serverUrl: args.serverUrl,
+    deviceName: args.deviceName,
+    appKey: args.appKey,
+    appSecret: args.appSecret,
+  });
 }
 
 /** 切换当前服务器。 */

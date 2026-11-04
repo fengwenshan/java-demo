@@ -333,6 +333,6 @@ class AuditQueryIntegrationTest extends IntegrationTestSupport {
         String ts = OffsetDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
         return new AuditEvent(ts, requestId, appKey, "其他客户端", null, "127.0.0.1",
                 "GET", "/api/files", null, "files.list", null, null, null, null, null,
-                null, null, null, 0L, 12L, 1L, 200, true, null, "JUnit", null);
+                null, null, null, 0L, 12L, 1L, 200, true, null, "JUnit", null, null);
     }
 }

@@ -177,7 +177,7 @@ class AuditStoreTest {
                 .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
         return new AuditEvent(ts, requestId, appKey, "测试客户端", "device-1", "127.0.0.1",
                 "GET", path, null, action, "default", null, "docs/a.txt", null, null, null,
-                null, null, 0L, 12L, 3L, status, success, null, "JUnit", null);
+                null, null, 0L, 12L, 3L, status, success, null, "JUnit", null, null);
     }
 
     private static List<String> tableNames(Connection connection) throws SQLException {

@@ -52,6 +52,7 @@ public class AuditLogService {
 
     private final AppProperties properties;
     private final AuditStore auditStore;
+    private final RelayViaCodec relayViaCodec;
     private final Path dir;
     private final int maxBodyChars;
     private final int maxHistoryDays;
@@ -64,9 +65,11 @@ public class AuditLogService {
     private BufferedWriter writer;
     private LocalDate writerDate;
 
-    public AuditLogService(AppProperties properties, AuditStore auditStore) {
+    public AuditLogService(AppProperties properties, AuditStore auditStore,
+                           RelayViaCodec relayViaCodec) {
         this.properties = properties;
         this.auditStore = auditStore;
+        this.relayViaCodec = relayViaCodec;
         AppProperties.Audit config = properties.getAudit();
         String configuredDir = config.getDir() == null || config.getDir().isBlank()
                 ? "./logs/audit" : config.getDir().trim();
@@ -154,6 +157,15 @@ public class AuditLogService {
             fileName = meta.newName();
         }
         long durationMs = Math.max(0L, (System.nanoTime() - startNanos) / 1_000_000L);
+        // 来源链由上一跳 relay 节点追加；解析失败不能影响审计落盘，记空继续。
+        java.util.List<RelayViaHop> relayVia;
+        try {
+            relayVia = relayViaCodec.decode(
+                    request.getHeader("X-Relay-Via"),
+                    properties.getRelay().getMaxViaHeaderBytes());
+        } catch (RuntimeException e) {
+            relayVia = java.util.List.of();
+        }
         return new AuditEvent(
                 OffsetDateTime.now().format(TS_FORMAT),
                 requestId,
@@ -180,7 +192,8 @@ public class AuditLogService {
                 success,
                 error,
                 request.getHeader("User-Agent"),
-                fileName);
+                fileName,
+                relayVia);
     }
 
     private void writerLoop() {

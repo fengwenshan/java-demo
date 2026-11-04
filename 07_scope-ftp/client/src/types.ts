@@ -1,5 +1,21 @@
 /** 与 Rust 侧（`src-tauri/src/*.rs`）及 docs/02-api-contract.md 对齐的类型定义。 */
 
+/** 服务器类型：直连（根节点）或挂在父服务器下面的转发目标。 */
+export type ServerKind = "direct" | "relay";
+
+/** 转发链上的一跳（用于可点击的链展示）。 */
+export interface ChainHop {
+  id: string;
+  name: string;
+}
+
+/** 服务端审计返回的来源跳（`appKey/name/url`，用于映射本地服务器）。 */
+export interface RelayViaHop {
+  appKey: string;
+  name: string;
+  url: string;
+}
+
 /** 一台服务器的视图（`get_config` 返回，不含任何凭据）。 */
 export interface ServerView {
   id: string;
@@ -18,10 +34,29 @@ export interface ServerView {
   hasCustomSecret: boolean;
   /** 服务器地址非空。 */
   configured: boolean;
+  /** direct = 直连根节点；relay = 转发目标。 */
+  kind: ServerKind;
+  /** 上级服务器 id；direct 为 null。 */
+  parentId: string | null;
+  /** 上级服务器名称；direct 为 null。 */
+  parentName: string | null;
+  /** 从根到当前目标的名称链，例如 ["A","B","C"]。 */
+  chainPath: string[];
+  /** 从根到当前目标的可点击链（含 id）。 */
+  chainHops: ChainHop[];
+  /** 所在树的根服务器 id（direct 为自身 id）。 */
+  rootId: string;
+  /** 所在树的根服务器名称。 */
+  rootName: string;
 }
 
 /** `get_config` / `save_server` 等返回的配置视图（不含 appSecret）。 */
 export interface ConfigView {
+  /** 配置 schema 版本（v3 起，旧客户端不兼容）。 */
+  configVersion: number;
+  /** 当前激活服务器；空配置时为 null。 */
+  activeServer: ServerView | null;
+  /** 当前激活服务器 id；空配置时为空串。 */
   activeServerId: string;
   servers: ServerView[];
   appKey: string;
@@ -206,6 +241,8 @@ export interface AuditLogItem {
   error: string | null;
   userAgent: string | null;
   fileName: string | null;
+  /** 请求来源链（转发链节点追加；直连目标没有该字段）。 */
+  relayVia?: RelayViaHop[];
 }
 
 /** `GET /api/audit/logs` 的分页 data（task-45）。 */

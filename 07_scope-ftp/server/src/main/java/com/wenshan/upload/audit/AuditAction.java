@@ -21,6 +21,10 @@ public final class AuditAction {
     public static String resolve(String method, String path) {
         String verb = method == null ? "" : method.toUpperCase(Locale.ROOT);
         String uri = path == null ? "" : path;
+        // 中转节点上的 relay 请求：剥离 /api/relay 前缀后调用本跳审计，动作加 relay. 前缀。
+        if (uri.startsWith("/api/relay/api/")) {
+            return "relay." + resolve(verb, uri.substring("/api/relay".length()));
+        }
         String exact = exactAction(verb, uri);
         if (exact != null) {
             return exact;

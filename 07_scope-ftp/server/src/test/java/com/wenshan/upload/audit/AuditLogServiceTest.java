@@ -28,7 +28,7 @@ class AuditLogServiceTest {
         AppProperties properties = new AppProperties();
         properties.getAudit().setDir(dir.resolve("audit").toString());
         properties.getAudit().setEnabled(true);
-        AuditLogService service = new AuditLogService(properties, new AuditStore(properties));
+        AuditLogService service = new AuditLogService(properties, new AuditStore(properties), new RelayViaCodec(new ObjectMapper()));
         try {
             assertThat(service.isActive()).isTrue();
             service.record(event("req-1", "GET", "/api/files", "files.list", 200, true, null));
@@ -55,7 +55,7 @@ class AuditLogServiceTest {
         AppProperties properties = new AppProperties();
         properties.getAudit().setDir(dir.resolve("audit").toString());
         properties.getAudit().setEnabled(false);
-        AuditLogService service = new AuditLogService(properties, new AuditStore(properties));
+        AuditLogService service = new AuditLogService(properties, new AuditStore(properties), new RelayViaCodec(new ObjectMapper()));
         try {
             assertThat(service.isActive()).isFalse();
             service.record(event("req", "GET", "/api/files", "files.list", 200, true, null));
@@ -71,7 +71,7 @@ class AuditLogServiceTest {
         AppProperties properties = new AppProperties();
         properties.getAudit().setDir(asFile.toString());
         properties.getAudit().setEnabled(true);
-        AuditLogService service = new AuditLogService(properties, new AuditStore(properties));
+        AuditLogService service = new AuditLogService(properties, new AuditStore(properties), new RelayViaCodec(new ObjectMapper()));
         try {
             assertThat(service.isActive()).isFalse();
             service.record(event("req", "GET", "/api/files", "files.list", 200, true, null));
@@ -88,7 +88,7 @@ class AuditLogServiceTest {
         AppProperties properties = new AppProperties();
         properties.getAudit().setDir(auditDir.toString());
         properties.getAudit().setEnabled(true);
-        AuditLogService service = new AuditLogService(properties, new AuditStore(properties));
+        AuditLogService service = new AuditLogService(properties, new AuditStore(properties), new RelayViaCodec(new ObjectMapper()));
         try {
             assertThat(service.isActive()).isTrue();
             // 启动后把目录换成同名普通文件：writer 打开当日文件会失败，只 warn，不影响 record 调用方
@@ -128,7 +128,7 @@ class AuditLogServiceTest {
                 requestId, "demo-app", "测试客户端", null, "127.0.0.1",
                 method, path, null, action,
                 "work", null, "docs/a.txt", null, null, null, null, null,
-                0L, 12L, 3L, status, success, error, "JUnit", null);
+                0L, 12L, 3L, status, success, error, "JUnit", null, null);
     }
 
     private static List<String> awaitLines(Path dir, int expected, long timeoutMs) throws Exception {
