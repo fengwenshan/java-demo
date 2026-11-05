@@ -66,7 +66,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         .icon_as_template(cfg!(target_os = "macos"))
         // 开发版托盘提示也带 Dev，和安装版区分。
         .tooltip(if cfg!(debug_assertions) {
-            "ScopeFTP Dev"
+            "ScopeFTP-dev"
         } else {
             "ScopeFTP"
         })
@@ -100,6 +100,8 @@ pub fn run() {
                 .parent()
                 .map(|dir| dir.join(uploads::UPLOAD_STATE_FILE_NAME))
                 .unwrap_or_else(|| PathBuf::from(uploads::UPLOAD_STATE_FILE_NAME));
+            // 开发构建首次启动时，从安装版配置复制一份初始配置（之后两边独立读写）。
+            config::seed_dev_config_from_release(app.handle());
             // 配置目录不可写时（例如受限沙箱）不阻断启动：本次会话使用内存配置，
             // 保存配置时会返回明确错误提示。
             let app_config = config::load_or_init(&config_path).unwrap_or_else(|error| {
@@ -126,11 +128,11 @@ pub fn run() {
             });
             create_tray(app)?;
 
-            // 开发版与安装版都叫 ScopeFTP：调试构建把窗口标题改成 ScopeFTP Dev，
+            // 开发版叫 ScopeFTP-dev、安装版叫 ScopeFTP：调试构建把窗口标题改成 ScopeFTP-dev，
             // 任务栏/窗口列表里也能和安装版区分开（安装包仍是 ScopeFTP）。
             #[cfg(debug_assertions)]
             if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = window.set_title("ScopeFTP Dev") {
+                if let Err(error) = window.set_title("ScopeFTP-dev") {
                     eprintln!("设置开发版窗口标题失败：{error}");
                 }
             }

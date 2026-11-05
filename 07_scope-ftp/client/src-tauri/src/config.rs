@@ -724,12 +724,55 @@ impl AppConfig {
     }
 }
 
-/// `app_config_dir()/config.json`。
+/// 开发构建的配置目录后缀：安装版用 `com.scopftp.client`，开发版用
+/// `com.scopftp.client-dev`，两套客户端的服务器列表 / deviceId / 续传状态互不影响，
+/// 避免开发版接管 deviceId 或改配置时污染安装版。
+const DEV_CONFIG_DIR_SUFFIX: &str = "-dev";
+
+/// `app_config_dir()/config.json`（开发构建用独立的 `-dev` 配置目录）。
 pub fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
+        .map(config_dir_for_build)
         .map(|dir| dir.join(CONFIG_FILE_NAME))
         .map_err(|e| format!("无法定位应用配置目录：{e}"))
+}
+
+/// 按构建类型返回配置目录：debug 构建加 `-dev` 后缀，release 构建原样返回。
+fn config_dir_for_build(dir: PathBuf) -> PathBuf {
+    if !cfg!(debug_assertions) {
+        return dir;
+    }
+    match (dir.parent(), dir.file_name().and_then(|name| name.to_str())) {
+        (Some(parent), Some(name)) => parent.join(format!("{name}{DEV_CONFIG_DIR_SUFFIX}")),
+        _ => dir,
+    }
+}
+
+/// 开发构建首次启动：`-dev` 配置目录还不存在时，把安装版配置复制一份作为初始配置。
+///
+/// 只复制一次（之后两边独立读写）：省得开发版重新填服务器地址 / AppKey / AppSecret，
+/// 但之后开发版接管 deviceId、增删服务器都不会再影响安装版。想从空配置开始调试，
+/// 删掉 `-dev` 目录即可（目录存在时不再复制）。
+pub fn seed_dev_config_from_release(app: &AppHandle) {
+    let Ok(release_dir) = app.path().app_config_dir() else {
+        return;
+    };
+    let dev_dir = config_dir_for_build(release_dir.clone());
+    if dev_dir == release_dir || dev_dir.exists() {
+        return;
+    }
+    let release_config = release_dir.join(CONFIG_FILE_NAME);
+    if !release_config.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::create_dir_all(&dev_dir) {
+        eprintln!("创建开发版配置目录失败：{error}");
+        return;
+    }
+    if let Err(error) = std::fs::copy(&release_config, dev_dir.join(CONFIG_FILE_NAME)) {
+        eprintln!("复制安装版配置到开发版配置目录失败：{error}");
+    }
 }
 
 /// 默认配置（内存态 / 首次安装）：显式创建一台内置默认地址的 direct 服务器 + 新 deviceId。
@@ -988,6 +1031,18 @@ mod tests {
 
     fn write_file(path: &Path, content: &str) {
         std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn dev_build_uses_separate_config_dir() {
+        let base = PathBuf::from("/tmp/support/com.scopftp.client");
+        let actual = config_dir_for_build(base.clone());
+        let expected = if cfg!(debug_assertions) {
+            PathBuf::from("/tmp/support/com.scopftp.client-dev")
+        } else {
+            base
+        };
+        assert_eq!(actual, expected);
     }
 
     #[test]

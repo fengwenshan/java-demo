@@ -178,7 +178,9 @@ pnpm tauri dev
 
 设置页有两个操作按钮：「保存配置」只保存本地配置，不验证、不激活，适合先落盘稍后再修/验证；「验证连接」先验证，成功再保存配置、再自动激活设备（添加页无需先添加；激活失败时保留服务器并提示原因，验证失败则不保存）；非当前服务器只能保存，验证需先在左侧切换；激活前客户端会先调一次 verify，避免被服务端按乱序封禁。之后点左侧服务器回到目录，用顶栏上传按钮选择文件上传。
 
-开发版和安装版都叫 ScopeFTP，容易分不清：`pnpm tauri dev` 起的开发版，标题栏品牌后面有橙色 `Dev` 标签，窗口标题、托盘提示和程序坞悬浮名都是 `ScopeFTP Dev`（开发构建启动时把二进制复制成 `ScopeFTP Dev` 再运行，见 `client/src-tauri/scripts/dev-runner.sh`）；下载安装的生产版没有 `Dev` 标记。两者共用同一个 identifier（`com.scopftp.client`）和本地配置目录，服务器列表与每台服务器的 `deviceId` 都一致，切换版本不会改变设备身份。
+开发版和安装版要区分开：`pnpm tauri dev` 起的开发版叫 **ScopeFTP-dev**（标题栏品牌后带橙色 `Dev` 标签，窗口标题、托盘提示和程序坞悬浮名都是 `ScopeFTP-dev`，开发构建启动时会把二进制复制成 `ScopeFTP-dev` 再运行，见 `client/src-tauri/scripts/dev-runner.sh`）；下载安装的生产版叫 **ScopeFTP**，没有 `Dev` 标记。
+
+两边的**本地配置目录也是分开的**：安装版用 `com.scopftp.client`，开发版用 `com.scopftp.client-dev`（debug 构建自动加 `-dev` 后缀），服务器列表、每台服务器的 `deviceId`、断点续传状态互不影响——开发版接管 deviceId 或删改服务器不会串到安装版。开发版第一次启动时会把安装版配置复制一份作为初始配置（只复制一次，省得重填地址/密钥），之后两边各自独立；想从空配置开始调试，删掉 `~/Library/Application Support/com.scopftp.client-dev` 目录即可。两者共用同一个 identifier，所以更新链路和打包配置一致。
 
 ### 1.1 设备绑定冲突（40300）怎么处理
 
