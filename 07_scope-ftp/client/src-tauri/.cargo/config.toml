@@ -1,0 +1,5 @@
+# 开发构建启动器：cargo run 时先把二进制复制成 "ScopeFTP Dev" 再启动，
+# 让 macOS 程序坞的悬浮名显示 ScopeFTP Dev，和安装版 ScopeFTP 区分。
+# 只影响 cargo run（含 pnpm tauri dev），打包/安装版不受影响。
+[target.'cfg(target_os = "macos")']
+runner = "scripts/dev-runner.sh"

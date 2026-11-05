@@ -1151,13 +1151,29 @@ impl Api {
     /// deviceId / deviceName（relay 时是最后一跳 B/C 的设备身份，不是 root A 的）。
     ///
     /// 服务端开启了 `device-binding-enabled` 且该 appKey 已绑定别的设备时返回 40300；
-    /// 这里在失败后再 verify 一次，把服务端已绑定的设备补进错误提示，用户才知道该
-    /// 解绑服务端还是换回原客户端。
+    /// 这里在失败后再 verify 一次，把服务端已绑定的设备补进错误提示。
     pub async fn activate(&self) -> Result<Value, String> {
-        self.require_configured()?;
         let target = self.target();
         let device_id = target.device_id.trim().to_string();
         let device_name = target.device_name.trim().to_string();
+        match self.activate_with_device(&device_id, &device_name).await {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self.explain_activate_error(error, &device_id).await),
+        }
+    }
+
+    /// 用显式指定的 deviceId / deviceName 激活（契约 3.3）。
+    ///
+    /// 开发构建里设备接管（见 [`crate::commands::activate`]）会用它按服务端已绑定的
+    /// deviceId 再激活一次；它只更新服务端该设备的名称与更新时间，不新增/删除绑定。
+    pub async fn activate_with_device(
+        &self,
+        device_id: &str,
+        device_name: &str,
+    ) -> Result<Value, String> {
+        self.require_configured()?;
+        let device_id = device_id.trim();
+        let device_name = device_name.trim();
         if device_id.is_empty() {
             return Err("缺少设备 ID，请重启客户端后重试".to_string());
         }
@@ -1169,17 +1185,30 @@ impl Api {
             "deviceName": device_name,
         }))
         .map_err(|e| format!("请求体序列化失败：{e}"))?;
-        match self
-            .send_json::<Value>(Method::POST, "/api/auth/activate", Some(body))
+        self.send_json::<Value>(Method::POST, "/api/auth/activate", Some(body))
             .await
-        {
-            Ok(value) => Ok(value),
-            Err(error) => Err(self.explain_activate_error(error, &device_id).await),
-        }
+    }
+
+    /// 读取服务端当前绑定的 deviceId（`GET /api/auth/verify` 的 `device`），只读不改服务端。
+    pub async fn bound_device_id(&self) -> Option<String> {
+        let data = self
+            .send_json::<Value>(Method::GET, "/api/auth/verify", None)
+            .await
+            .ok()?;
+        data.get("device")
+            .and_then(|device| device.get("deviceId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
     }
 
     /// 激活被拒且原因是设备绑定冲突时，补充服务端已绑定的设备信息；其它错误原样返回。
-    async fn explain_activate_error(&self, error: String, local_device_id: &str) -> String {
+    pub(crate) async fn explain_activate_error(
+        &self,
+        error: String,
+        local_device_id: &str,
+    ) -> String {
         if !error.contains("设备未授权") {
             return error;
         }

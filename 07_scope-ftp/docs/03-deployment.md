@@ -478,4 +478,4 @@ macOS 上 Java 监听 IPv6 `*:9090` 时，另一个前端项目的 Vite 可能�
   ```bash
   sqlite3 <存储根>/.upload-meta/metadata.sqlite3 "DELETE FROM device_meta WHERE app_key='<AppKey>';"
   ```
-  客户端在服务器详情页能看到本地 `deviceId` 与服务端已绑定设备；解绑后到「设置 → 验证连接」重新激活。仅本机联调时可把该环境的 `device-binding-enabled` 改成 `false`（dev profile 默认关闭）。
+  客户端在服务器详情页能看到本地 `deviceId` 与服务端已绑定设备；解绑后到「设置 → 验证连接」重新激活。仅本机联调时可把该环境的 `device-binding-enabled` 改成 `false`（dev profile 默认关闭）；开发版客户端（debug 构建）在激活遇到 40300 时还会自动接管服务端已绑定的 `deviceId`（只改本机配置，不动服务端绑定），方便连远端联调，安装版不会接管。

@@ -297,6 +297,24 @@ impl AppConfig {
         self.servers.iter().find(|server| server.id == id.trim())
     }
 
+    /// 改写指定服务器的 deviceId（开发构建设备接管用）。
+    ///
+    /// 只改本地配置，不动服务端绑定：开发版连到已绑定其它 deviceId 的远端服务端时，
+    /// 接管服务端记录的 deviceId 再激活，文件接口的 `X-Device-Id` 才能对上绑定。
+    pub fn set_device_id(&mut self, id: &str, device_id: &str) -> Result<(), String> {
+        let device_id = device_id.trim();
+        if device_id.is_empty() {
+            return Err("设备 ID 不能为空".to_string());
+        }
+        let server = self
+            .servers
+            .iter_mut()
+            .find(|server| server.id == id.trim())
+            .ok_or_else(|| "服务器不存在，可能已被删除".to_string())?;
+        server.device_id = device_id.to_string();
+        Ok(())
+    }
+
     /// 解析从根到 `id` 的转发链（顺序 root → target）：
     /// - 按 `parentId` 回溯并反转；
     /// - 校验父存在、无环、层级不超过 [`MAX_CHAIN_HOPS`]、根必须是 direct。
@@ -1451,6 +1469,22 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].kind, ServerKind::Direct);
         assert!(config.resolve_chain("missing").is_err());
+    }
+
+    #[test]
+    fn set_device_id_updates_only_that_server() {
+        let mut config = AppConfig::default();
+        let a = config.save_server(None, "A", "http://a", "dev").unwrap();
+        let b = config
+            .save_relay(None, &a.id, "B", "http://b", "dev", "kb", Some("sb"))
+            .unwrap();
+
+        config.set_device_id(&b.id, " bound-device ").unwrap();
+        assert_eq!(config.find(&b.id).unwrap().device_id, "bound-device");
+        assert_eq!(config.find(&a.id).unwrap().device_id, a.device_id);
+
+        assert!(config.set_device_id(&b.id, "  ").is_err());
+        assert!(config.set_device_id("missing", "x").is_err());
     }
 
     #[test]

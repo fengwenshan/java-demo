@@ -437,6 +437,18 @@ export default function App() {
     [activeServer, refreshRoots],
   );
 
+  /**
+   * 激活成功后同步一次配置：开发构建可能在激活时接管服务端已绑定的 deviceId，
+   * 不同步的话列表/详情页还显示旧 ID，详情页会误报「服务端已绑定其他设备」。
+   */
+  const handleActivated = useCallback(async () => {
+    try {
+      setConfig(await getConfig());
+    } catch {
+      // 只是同步设备 ID，失败不影响已经完成的激活。
+    }
+  }, []);
+
   const handleRecheck = useCallback(async () => {
     if (!isTauri()) return;
     try {
@@ -560,6 +572,7 @@ export default function App() {
                   onSaved={handleConfigSaved}
                   onDeleted={handleServerDeleted}
                   onVerified={handleVerified}
+                  onActivated={handleActivated}
                   onRecheck={handleRecheck}
                   onDirtyChange={setSettingsDirty}
                   onOpenDetail={openDetailView}

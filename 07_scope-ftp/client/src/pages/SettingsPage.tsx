@@ -94,6 +94,8 @@ export interface SettingsPageProps {
   ) => void | Promise<void>;
   onDeleted: (config: ConfigView, deletedId: string) => void | Promise<void>;
   onVerified: (data: VerifyResult) => void;
+  /** 设备激活成功后调用；开发构建接管 deviceId 时用它同步外层配置。 */
+  onActivated: () => void | Promise<void>;
   onRecheck: () => void | Promise<void>;
   /** 把“是否有未保存修改”同步给外层，用于离开设置页时提醒。 */
   onDirtyChange: (dirty: boolean) => void;
@@ -111,6 +113,7 @@ export default function SettingsPage({
   onSaved,
   onDeleted,
   onVerified,
+  onActivated,
   onRecheck,
   onDirtyChange,
   onOpenDetail,
@@ -444,8 +447,12 @@ export default function SettingsPage({
         // 预览验证用的是临时 deviceId；保存后切换到了真实 deviceId，重新 verify 后
         // 立即激活目标设备，避免用户点进目录时因未激活被 40300 拦住。
         try {
-          await activateDevice();
-          message.success(`代理服务器「${values.name}」设备已激活`);
+          const activated = await activateDevice();
+          await onActivated();
+          const adopted = activated.devAdopted
+            ? "（开发版已接管服务端已绑定的设备 ID）"
+            : "";
+          message.success(`代理服务器「${values.name}」设备已激活${adopted}`);
         } catch (error) {
           message.warning(
             `代理服务器已添加，但设备激活失败：${errorMessage(error)}`,
@@ -485,8 +492,12 @@ export default function SettingsPage({
         // 添加成功后自动激活设备：服务端开启设备绑定时，文件操作只认激活过的设备。
         // 激活失败不影响已添加的服务器（例如该 AppKey 已绑定其它设备），只提示原因。
         try {
-          await activateDevice();
-          message.success("连接验证成功，服务器已添加并激活设备");
+          const activated = await activateDevice();
+          await onActivated();
+          const adopted = activated.devAdopted
+            ? "（开发版已接管服务端已绑定的设备 ID）"
+            : "";
+          message.success(`连接验证成功，服务器已添加并激活设备${adopted}`);
         } catch (error) {
           message.warning(
             `服务器已添加，但设备激活失败：${errorMessage(error)}`,
@@ -555,7 +566,11 @@ export default function SettingsPage({
       // 因此验证成功后自动激活设备；激活失败不影响验证结果，只提示原因。
       try {
         const activated = await activateDevice();
-        message.success(`连接验证成功，设备已激活：${activated.deviceName}`);
+        await onActivated();
+        const adopted = activated.devAdopted
+          ? "（开发版已接管服务端已绑定的设备 ID）"
+          : "";
+        message.success(`连接验证成功，设备已激活：${activated.deviceName}${adopted}`);
         try {
           const refreshed = await verifyConnection();
           onVerified(refreshed);
@@ -583,6 +598,7 @@ export default function SettingsPage({
     isRelay,
     isRelayNew,
     message,
+    onActivated,
     onOpenDetail,
     onRecheck,
     onVerified,

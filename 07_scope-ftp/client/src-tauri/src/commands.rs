@@ -586,10 +586,84 @@ fn saved_preview_profile(
     Ok(profile)
 }
 
+/// 当前请求目标（转发链最后一跳；直连时就是当前服务器）。
+fn active_target(state: &AppState) -> Result<ServerProfile, String> {
+    let config = state
+        .config
+        .lock()
+        .map_err(|_| "配置状态异常，请重启客户端".to_string())?
+        .clone();
+    let active = config.require_active()?;
+    config
+        .resolve_chain(&active.id)?
+        .last()
+        .map(|server| (*server).clone())
+        .ok_or_else(|| "服务器不存在，可能已被删除".to_string())
+}
+
+/// 开发构建专用：把服务端已绑定的 deviceId 写回本地配置（只改本地，不动服务端绑定）。
+#[cfg(debug_assertions)]
+fn adopt_device_id(state: &AppState, device_id: &str) -> Result<(), String> {
+    let mut config = state
+        .config
+        .lock()
+        .map_err(|_| "配置状态异常，请重启客户端".to_string())?
+        .clone();
+    let active_id = config.require_active()?.id.clone();
+    let target_id = config
+        .resolve_chain(&active_id)?
+        .last()
+        .map(|server| server.id.clone())
+        .ok_or_else(|| "服务器不存在，可能已被删除".to_string())?;
+    config.set_device_id(&target_id, device_id)?;
+    // 先落盘再替换内存，避免写盘失败导致内存与磁盘不一致。
+    config::persist(&state.config_path, &config)?;
+    *state
+        .config
+        .lock()
+        .map_err(|_| "配置状态异常，请重启客户端".to_string())? = config;
+    Ok(())
+}
+
 /// 设备激活/绑定（契约 3.3），使用当前服务器的 deviceId / deviceName。
+///
+/// 开发构建（debug）里，如果服务端按 40300 拒绝且该 AppKey 已绑定别的 deviceId，
+/// 会自动接管服务端记录的 deviceId 再激活一次：只把本机配置的 deviceId 改掉，
+/// 服务端只更新该设备的名称/时间，不新增也不删除绑定，方便开发机直连远端联调。
+/// 安装版（release）不接管，仍返回 40300 让用户去服务端解绑。
 #[tauri::command]
 pub async fn activate(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    api_from(&state)?.activate().await
+    let api = api_from(&state)?;
+    let target = active_target(&state)?;
+    match api
+        .activate_with_device(&target.device_id, &target.device_name)
+        .await
+    {
+        Ok(value) => Ok(value),
+        Err(error) if error.contains("设备未授权") => {
+            #[cfg(debug_assertions)]
+            if let Some(bound_id) = api.bound_device_id().await {
+                if bound_id != target.device_id {
+                    if let Ok(mut value) = api
+                        .activate_with_device(&bound_id, &target.device_name)
+                        .await
+                    {
+                        adopt_device_id(&state, &bound_id)?;
+                        eprintln!("[dev] 已接管服务端绑定的设备 {bound_id}（仅开发构建）");
+                        // 告知前端这次激活接管了服务端已绑定的 deviceId，UI 上提示一下。
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert("devAdopted".to_string(), serde_json::Value::Bool(true));
+                        }
+                        return Ok(value);
+                    }
+                }
+            }
+            Err(api
+                .explain_activate_error(error, &target.device_id)
+                .await)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// 列出服务端可用的存储根（task-16 多存储根）；旧单根服务端没有该接口时

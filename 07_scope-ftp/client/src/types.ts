@@ -314,6 +314,8 @@ export interface ActivateResult {
   deviceName: string;
   boundAt: string;
   serverTime: number;
+  /** 仅开发构建：本次激活接管了服务端已绑定的 deviceId（生产构建不会出现）。 */
+  devAdopted?: boolean;
 }
 
 /** 本机网络信息（`get_local_network_info`）：物理地址 + 默认路由网卡的局域网 IPv4。 */

@@ -178,7 +178,7 @@ pnpm tauri dev
 
 设置页有两个操作按钮：「保存配置」只保存本地配置，不验证、不激活，适合先落盘稍后再修/验证；「验证连接」先验证，成功再保存配置、再自动激活设备（添加页无需先添加；激活失败时保留服务器并提示原因，验证失败则不保存）；非当前服务器只能保存，验证需先在左侧切换；激活前客户端会先调一次 verify，避免被服务端按乱序封禁。之后点左侧服务器回到目录，用顶栏上传按钮选择文件上传。
 
-开发版和安装版都叫 ScopeFTP，容易分不清：`pnpm tauri dev` 起的开发版，标题栏品牌后面有橙色 `Dev` 标签、窗口标题是 `ScopeFTP Dev`；下载安装的生产版没有 `Dev` 标签。两者共用同一个 identifier（`com.scopftp.client`）和本地配置目录，服务器列表与每台服务器的 `deviceId` 都一致，切换版本不会改变设备身份。
+开发版和安装版都叫 ScopeFTP，容易分不清：`pnpm tauri dev` 起的开发版，标题栏品牌后面有橙色 `Dev` 标签，窗口标题、托盘提示和程序坞悬浮名都是 `ScopeFTP Dev`（开发构建启动时把二进制复制成 `ScopeFTP Dev` 再运行，见 `client/src-tauri/scripts/dev-runner.sh`）；下载安装的生产版没有 `Dev` 标记。两者共用同一个 identifier（`com.scopftp.client`）和本地配置目录，服务器列表与每台服务器的 `deviceId` 都一致，切换版本不会改变设备身份。
 
 ### 1.1 设备绑定冲突（40300）怎么处理
 
@@ -194,7 +194,8 @@ pnpm tauri dev
      "DELETE FROM device_meta WHERE app_key='<你的 AppKey>';"
    ```
 2. 客户端重新「设置 → 验证连接」激活即可。
-3. 只是本机联调时，用 dev profile（`application-dev.yml` 默认关闭设备绑定）或把该环境的 `device-binding-enabled` 改成 `false` 后重启，`activate` 会自动改绑到当前设备。
+3. 只是本机联调、又不方便动远端服务端时，**用开发版（`pnpm tauri dev`，debug 构建）连**：激活遇到 40300 时它会自动接管服务端已绑定的 `deviceId`（只改本机配置里的 deviceId，服务端仅更新该设备的名称/时间，不增删绑定），提示里会带「开发版已接管服务端已绑定的设备 ID」，之后文件操作就能通过。安装版（release）不接管，仍按 40300 报错。
+4. 服务端本地开发时，用 dev profile（`application-dev.yml` 默认关闭设备绑定）或把该环境的 `device-binding-enabled` 改成 `false` 后重启，`activate` 会自动改绑到当前设备。
 
 ### 1.2 多级转发（A → B → C）操作
 
