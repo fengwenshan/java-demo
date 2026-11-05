@@ -261,7 +261,7 @@ jobs:
         with:
           name: ScopeFTP-client-windows-x64
           path: |
-            07_scope-ftp/client/src-tauri/target/**/release/ScopeFTP-client.exe
+            07_scope-ftp/client/src-tauri/target/**/release/ScopeFTP.exe
             07_scope-ftp/client/src-tauri/target/**/release/bundle/nsis/*.exe
             07_scope-ftp/client/src-tauri/target/**/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
@@ -307,7 +307,7 @@ jobs:
           fail_on_unmatched_files: false
           files: |
             release-assets/ScopeFTP-Server-package/*.zip
-            release-assets/ScopeFTP-macos-*/*.dmg
+            release-assets/ScopeFTP-macos-*/**/*.dmg
             release-assets/ScopeFTP-client-windows-x64/*.exe
             release-assets/updater/*
             release-assets/latest.json
