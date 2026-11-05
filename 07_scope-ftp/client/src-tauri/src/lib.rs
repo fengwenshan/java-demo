@@ -64,6 +64,12 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     TrayIconBuilder::new()
         .icon(icon)
         .icon_as_template(cfg!(target_os = "macos"))
+        // 开发版托盘提示也带 Dev，和安装版区分。
+        .tooltip(if cfg!(debug_assertions) {
+            "ScopeFTP Dev"
+        } else {
+            "ScopeFTP"
+        })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left | MouseButton::Right,
@@ -119,6 +125,15 @@ pub fn run() {
                 upload_state_path,
             });
             create_tray(app)?;
+
+            // 开发版与安装版都叫 ScopeFTP：调试构建把窗口标题改成 ScopeFTP Dev，
+            // 任务栏/窗口列表里也能和安装版区分开（安装包仍是 ScopeFTP）。
+            #[cfg(debug_assertions)]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window.set_title("ScopeFTP Dev") {
+                    eprintln!("设置开发版窗口标题失败：{error}");
+                }
+            }
 
             // 自绘标题栏：Windows 去掉原生边框，最小化/最大化/关闭由前端标题栏负责；
             // macOS 保留 Overlay 的系统红绿灯，Linux 继续用系统边框。

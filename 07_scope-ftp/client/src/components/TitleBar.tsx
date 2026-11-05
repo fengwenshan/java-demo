@@ -114,6 +114,12 @@ export default function TitleBar({ update }: TitleBarProps) {
           draggable={false}
         />
         <span className="titlebar-name">ScopeFTP</span>
+        {/* 开发版与安装版都叫 ScopeFTP，这里加 Dev 标记方便同时开着时区分；生产构建不显示。 */}
+        {import.meta.env.DEV && (
+          <span className="titlebar-env" data-testid="titlebar-env">
+            Dev
+          </span>
+        )}
       </div>
 
       <div className="titlebar-actions">

@@ -207,6 +207,22 @@ body {
   white-space: nowrap;
 }
 
+/* 开发版标记：标题栏右侧状态区旁边的 Dev 小标签，用来区分开发版和安装版。 */
+.titlebar-env {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid #ffd591;
+  border-radius: 4px;
+  background: #fff7e6;
+  color: #d46b08;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .titlebar-actions {
   display: flex;
   align-items: center;

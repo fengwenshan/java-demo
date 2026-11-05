@@ -142,6 +142,17 @@ export default function ServerDetailPage({
     };
   }, []);
 
+  /**
+   * 服务端已绑定别的设备：开着设备绑定时，activate 和文件接口都会按 40300 拒绝。
+   * 服务端把 appKey 绑定到固定 deviceId，本机换过客户端（或删掉重加服务器）后
+   * deviceId 变了就会命中这种情况，这里提前提示，别等用户点到目录才报错。
+   */
+  const boundDevice = isActiveServer ? verify?.device ?? null : null;
+  const bindingConflict =
+    Boolean(verify?.deviceBindingEnabled) &&
+    Boolean(boundDevice?.deviceId) &&
+    boundDevice?.deviceId !== server.deviceId;
+
   const browseDisabled = browserMode || !server.configured;
   const browseDisabledReason = browserMode
     ? "浏览器预览环境不可用"
@@ -256,6 +267,16 @@ export default function ServerDetailPage({
             showIcon
             message={`「${server.name}」不是当前服务器`}
             description="连接状态、设备绑定、服务端标识和存储目录需要切换为当前服务器后才能查看；点「浏览文件」会自动切换。"
+          />
+        )}
+
+        {bindingConflict && boundDevice && (
+          <Alert
+            className="server-detail-note"
+            type="warning"
+            showIcon
+            message="服务端已绑定其他设备"
+            description={`服务端上该 AppKey 绑定的是「${boundDevice.deviceName}」（${boundDevice.deviceId}），与本机设备 ${server.deviceId} 不一致，激活和文件操作会被服务端按 40300 拒绝。请在服务端删除该 AppKey 的绑定记录（存储根下 .upload-meta 的 device_meta 表）后，到「设置 → 验证连接」重新激活。`}
           />
         )}
 

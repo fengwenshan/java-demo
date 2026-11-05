@@ -474,3 +474,8 @@ macOS 上 Java 监听 IPv6 `*:9090` 时，另一个前端项目的 Vite 可能�
 - **端口**：仅暴露 Nginx 的 443；服务端口（dev 9090 / docker、xiaoshan 8080 / xihu 8787）不要直接暴露公网（云安全组限制内网）。
 - **健康检查**：`GET /api/health` 免签，可接入负载均衡/监控。
 - **时区**：签名时间戳是 epoch 毫秒，与服务器时区无关；只要客户端时钟准确即可。
+- **设备绑定（40300）**：`device-binding-enabled: true` 时每个 AppKey 只允许一个 `deviceId`。客户端删除重加服务器、或换了客户端应用（identifier 变化导致配置目录变化）都会生成新的 `deviceId`，激活会返回 40300。解绑（`device_meta` 每个 AppKey 一条，删除后需重启服务，启动时才载入内存）：
+  ```bash
+  sqlite3 <存储根>/.upload-meta/metadata.sqlite3 "DELETE FROM device_meta WHERE app_key='<AppKey>';"
+  ```
+  客户端在服务器详情页能看到本地 `deviceId` 与服务端已绑定设备；解绑后到「设置 → 验证连接」重新激活。仅本机联调时可把该环境的 `device-binding-enabled` 改成 `false`（dev profile 默认关闭）。

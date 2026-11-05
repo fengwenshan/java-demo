@@ -1149,11 +1149,15 @@ impl Api {
 
     /// `POST /api/auth/activate`：设备激活/绑定（契约 3.3），使用**目标服务器**的
     /// deviceId / deviceName（relay 时是最后一跳 B/C 的设备身份，不是 root A 的）。
+    ///
+    /// 服务端开启了 `device-binding-enabled` 且该 appKey 已绑定别的设备时返回 40300；
+    /// 这里在失败后再 verify 一次，把服务端已绑定的设备补进错误提示，用户才知道该
+    /// 解绑服务端还是换回原客户端。
     pub async fn activate(&self) -> Result<Value, String> {
         self.require_configured()?;
         let target = self.target();
-        let device_id = target.device_id.trim();
-        let device_name = target.device_name.trim();
+        let device_id = target.device_id.trim().to_string();
+        let device_name = target.device_name.trim().to_string();
         if device_id.is_empty() {
             return Err("缺少设备 ID，请重启客户端后重试".to_string());
         }
@@ -1165,8 +1169,43 @@ impl Api {
             "deviceName": device_name,
         }))
         .map_err(|e| format!("请求体序列化失败：{e}"))?;
-        self.send_json::<Value>(Method::POST, "/api/auth/activate", Some(body))
+        match self
+            .send_json::<Value>(Method::POST, "/api/auth/activate", Some(body))
             .await
+        {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self.explain_activate_error(error, &device_id).await),
+        }
+    }
+
+    /// 激活被拒且原因是设备绑定冲突时，补充服务端已绑定的设备信息；其它错误原样返回。
+    async fn explain_activate_error(&self, error: String, local_device_id: &str) -> String {
+        if !error.contains("设备未授权") {
+            return error;
+        }
+        let bound = self
+            .send_json::<Value>(Method::GET, "/api/auth/verify", None)
+            .await
+            .ok()
+            .and_then(|data| data.get("device").cloned())
+            .filter(|device| !device.is_null());
+        let Some(device) = bound else {
+            return format!(
+                "{error}：该 AppKey 已绑定其他设备，请在服务端解绑后重新激活（当前设备 {local_device_id}）。"
+            );
+        };
+        let name = device
+            .get("deviceName")
+            .and_then(Value::as_str)
+            .unwrap_or("未知设备");
+        let id = device
+            .get("deviceId")
+            .and_then(Value::as_str)
+            .unwrap_or("未知 ID");
+        format!(
+            "该 AppKey 已绑定其他客户端「{name}」（{id}），当前设备 {local_device_id} 无法激活。\
+             请在服务端删除该 AppKey 的绑定记录后，重新点「验证连接」激活。"
+        )
     }
 
     /// `GET /api/files`：分页查询文件列表（契约 3.4）。
