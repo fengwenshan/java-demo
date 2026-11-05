@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, App as AntdApp, Button, Empty, Layout, Spin, Typography } from "antd";
-import { getVersion } from "@tauri-apps/api/app";
 
 import {
   deleteServer,
@@ -20,6 +19,7 @@ import type {
   VerifyResult,
 } from "./types";
 import ServerSidebar from "./components/ServerSidebar";
+import TitleBar from "./components/TitleBar";
 import ServerBrowser from "./pages/ServerBrowser";
 import ServerDetailPage from "./pages/ServerDetailPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -64,15 +64,7 @@ export default function App() {
   const [activeRootId, setActiveRootId] = useState<string | null>(null);
   /** 每台服务器记住上次选择的存储根（仅内存，重启后回到 defaultRootId）。 */
   const rootByServerRef = useRef<Record<string, string>>({});
-  const [clientVersion, setClientVersion] = useState("—");
   const autoUpdate = useAutoUpdate(isTauri() && !browserMode);
-
-  useEffect(() => {
-    if (!isTauri()) return;
-    void getVersion()
-      .then(setClientVersion)
-      .catch(() => setClientVersion("—"));
-  }, []);
 
   // 全局关闭 WebView 默认右键菜单（Reload / Inspect Element 等）；
   // 输入框、文本域和可编辑区域保留系统编辑菜单（复制/粘贴）。
@@ -459,126 +451,125 @@ export default function App() {
   }, [config, message, refreshConnection]);
 
   return (
-    <Layout className="app-shell">
-      <Layout.Sider width={288} theme="light" className="app-sider">
-        <ServerSidebar
-          config={config}
-          activeServer={activeServer}
-          connection={connection}
-          serverHealth={serverHealth}
-          configured={configured}
-          clientVersion={clientVersion}
-          updatePhase={autoUpdate.phase}
-          availableUpdateVersion={autoUpdate.availableVersion}
-          onCheckUpdate={() => void autoUpdate.checkNow(true)}
-          roots={roots}
-          activeRootId={activeRoot?.id ?? null}
-          onSelectRoot={handleSelectRoot}
-          onSelectServer={handleSelectServer}
-          onAddServer={handleAddServer}
-          onOpenDetail={handleOpenDetail}
-          onOpenSettings={handleOpenSettings}
-        />
-      </Layout.Sider>
+    <div className="app-layout">
+      <TitleBar update={autoUpdate} />
+      <Layout className="app-shell">
+        <Layout.Sider width={288} theme="light" className="app-sider">
+          <ServerSidebar
+            config={config}
+            activeServer={activeServer}
+            connection={connection}
+            serverHealth={serverHealth}
+            configured={configured}
+            roots={roots}
+            activeRootId={activeRoot?.id ?? null}
+            onSelectRoot={handleSelectRoot}
+            onSelectServer={handleSelectServer}
+            onAddServer={handleAddServer}
+            onOpenDetail={handleOpenDetail}
+            onOpenSettings={handleOpenSettings}
+          />
+        </Layout.Sider>
 
-      <Layout className="app-main-layout">
-        <Content className="app-main-content">
-          {browserMode && (
-            <Alert
-              className="browser-hint"
-              data-testid="browser-hint"
-              type="warning"
-              showIcon
-              message="请使用桌面客户端运行"
-            />
-          )}
+        <Layout className="app-main-layout">
+          <Content className="app-main-content">
+            {browserMode && (
+              <Alert
+                className="browser-hint"
+                data-testid="browser-hint"
+                type="warning"
+                showIcon
+                message="请使用桌面客户端运行"
+              />
+            )}
 
-          {loadingConfig ? (
-            <div className="app-loading">
-              <Spin size="large" />
-              <Text type="secondary">正在加载配置…</Text>
-            </div>
-          ) : view === "browser" ? (
-            // 空配置（没有任何服务器 / 没有 active）时右侧显示空态；有 active 才渲染浏览器。
-            config && !config.activeServer ? (
-              <div className="empty-config" data-testid="empty-config">
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="还没有服务器"
-                >
-                  <Button type="primary" onClick={handleAddServer}>
-                    添加服务器
-                  </Button>
-                </Empty>
+            {loadingConfig ? (
+              <div className="app-loading">
+                <Spin size="large" />
+                <Text type="secondary">正在加载配置…</Text>
               </div>
+            ) : view === "browser" ? (
+              // 空配置（没有任何服务器 / 没有 active）时右侧显示空态；有 active 才渲染浏览器。
+              config && !config.activeServer ? (
+                <div className="empty-config" data-testid="empty-config">
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="还没有服务器"
+                  >
+                    <Button type="primary" onClick={handleAddServer}>
+                      添加服务器
+                    </Button>
+                  </Empty>
+                </div>
+              ) : (
+                <ServerBrowser
+                  key={`${activeServer?.id ?? "unconfigured"}:${activeRoot?.id ?? "default"}`}
+                  configured={configured}
+                  serverName={activeServer?.name}
+                  chainPath={activeServer?.chainPath}
+                  servers={config?.servers}
+                  onSelectServer={handleSelectServer}
+                  rootId={activeRoot?.id ?? null}
+                  rootName={activeRoot?.name ?? null}
+                  rootPath={activeRoot?.path ?? null}
+                  roots={roots}
+                  onGoSettings={handleOpenSettings}
+                />
+              )
+            ) : view === "detail" ? (
+              detailServer ? (
+                <ServerDetailPage
+                  server={detailServer}
+                  isActiveServer={detailServer.id === activeServer?.id}
+                  connection={connection}
+                  servers={config?.servers ?? []}
+                  verify={detailServer.id === activeServer?.id ? verify : null}
+                  roots={detailServer.id === activeServer?.id ? roots : []}
+                  browserMode={browserMode}
+                  onEdit={handleEditServer}
+                  onBrowseFiles={handleSelectServer}
+                  onSelectServer={handleSelectServer}
+                  onRecheck={handleRecheck}
+                  onAddRelay={handleAddRelay}
+                  onDelete={handleDeleteServer}
+                />
+              ) : (
+                <div className="empty-config" data-testid="server-detail-missing">
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="服务器已不存在"
+                  >
+                    <Button type="primary" onClick={handleAddServer}>
+                      添加服务器
+                    </Button>
+                  </Empty>
+                </div>
+              )
             ) : (
-              <ServerBrowser
-                key={`${activeServer?.id ?? "unconfigured"}:${activeRoot?.id ?? "default"}`}
-                configured={configured}
-                serverName={activeServer?.name}
-                chainPath={activeServer?.chainPath}
-                servers={config?.servers}
-                onSelectServer={handleSelectServer}
-                rootId={activeRoot?.id ?? null}
-                rootName={activeRoot?.name ?? null}
-                rootPath={activeRoot?.path ?? null}
-                roots={roots}
-                onGoSettings={handleOpenSettings}
-              />
-            )
-          ) : view === "detail" ? (
-            detailServer ? (
-              <ServerDetailPage
-                server={detailServer}
-                isActiveServer={detailServer.id === activeServer?.id}
-                connection={connection}
-                servers={config?.servers ?? []}
-                verify={detailServer.id === activeServer?.id ? verify : null}
-                roots={detailServer.id === activeServer?.id ? roots : []}
-                browserMode={browserMode}
-                onEdit={handleEditServer}
-                onBrowseFiles={handleSelectServer}
-                onSelectServer={handleSelectServer}
-                onRecheck={handleRecheck}
-                onAddRelay={handleAddRelay}
-                onDelete={handleDeleteServer}
-              />
-            ) : (
-              <div className="empty-config" data-testid="server-detail-missing">
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="服务器已不存在"
-                >
-                  <Button type="primary" onClick={handleAddServer}>
-                    添加服务器
-                  </Button>
-                </Empty>
-              </div>
-            )
-          ) : (
-            <>
-              <SettingsPage
-                config={config}
-                server={editingServer}
-                isNew={
-                  settingsTarget?.kind === "new" ||
-                  settingsTarget?.kind === "newRelay"
-                }
-                relayParent={relayParent}
-                connection={connection}
-                browserMode={browserMode}
-                onSaved={handleConfigSaved}
-                onDeleted={handleServerDeleted}
-                onVerified={handleVerified}
-                onRecheck={handleRecheck}
-                onDirtyChange={setSettingsDirty}
-                onOpenDetail={openDetailView}
-              />
-            </>
-          )}
-        </Content>
+              <>
+                <SettingsPage
+                  config={config}
+                  server={editingServer}
+                  isNew={
+                    settingsTarget?.kind === "new" ||
+                    settingsTarget?.kind === "newRelay"
+                  }
+                  relayParent={relayParent}
+                  connection={connection}
+                  browserMode={browserMode}
+                  onSaved={handleConfigSaved}
+                  onDeleted={handleServerDeleted}
+                  onVerified={handleVerified}
+                  onRecheck={handleRecheck}
+                  onDirtyChange={setSettingsDirty}
+                  onOpenDetail={openDetailView}
+                />
+              </>
+            )}
+          </Content>
 
+        </Layout>
       </Layout>
-    </Layout>
+    </div>
   );
 }

@@ -119,6 +119,15 @@ pub fn run() {
                 upload_state_path,
             });
             create_tray(app)?;
+
+            // 自绘标题栏：Windows 去掉原生边框，最小化/最大化/关闭由前端标题栏负责；
+            // macOS 保留 Overlay 的系统红绿灯，Linux 继续用系统边框。
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window.set_decorations(false) {
+                    eprintln!("关闭系统标题栏失败：{error}");
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -161,6 +170,7 @@ pub fn run() {
             commands::open_server_file,
             commands::terminal_exec,
             commands::get_local_network_info,
+            commands::get_platform_info,
         ])
         .build(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");

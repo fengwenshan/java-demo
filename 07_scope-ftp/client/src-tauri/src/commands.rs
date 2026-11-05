@@ -387,6 +387,37 @@ pub fn get_local_network_info() -> crate::net::LocalNetworkInfo {
     crate::net::local_network_info()
 }
 
+/// 平台信息：前端据此决定自绘标题栏的布局。
+///
+/// - macOS：标题栏左侧要给系统红绿灯留白；
+/// - Windows：原生边框已去掉，标题栏自己画最小化/最大化/关闭按钮；
+/// - Linux：保留系统边框，标题栏只放品牌与更新按钮。
+///
+/// 用编译期 target 判断，不靠 userAgent 猜（打包后的 WebView 标识各版本不一致）。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformInfo {
+    /// `windows` / `macos` / `linux`
+    pub os: &'static str,
+    /// 架构，例如 `aarch64` / `x86_64`
+    pub arch: &'static str,
+}
+
+#[tauri::command]
+pub fn get_platform_info() -> PlatformInfo {
+    let os = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    PlatformInfo {
+        os,
+        arch: std::env::consts::ARCH,
+    }
+}
+
 // ============================================================================
 // 本地文件辅助
 // ============================================================================

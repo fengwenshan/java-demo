@@ -1,10 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口能力：仅核心默认权限与文件选择/保存对话框",
+  "description": "主窗口能力：核心默认权限、自绘标题栏的窗口操作权限与文件选择/保存对话框",
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
     "dialog:allow-open",
     "dialog:allow-save",
     "updater:default",

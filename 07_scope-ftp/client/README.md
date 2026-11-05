@@ -3,7 +3,7 @@
 Tauri 2 + React 18 + TypeScript + Vite 6 + Ant Design 5 桌面客户端，产品名、安装包和二进制名统一为 `ScopeFTP`。
 所有网络请求、HMAC-SHA256 签名、文件读写都在 Rust 侧完成，WebView 拿不到 `appSecret`。
 
-功能包括：FTP 式目录浏览/上传/下载/删除、拷贝移动、在线编辑（Monaco）、zip 解压、远程终端，以及顶栏日志抽屉（操作/连接日志合并视图，类型/操作/成功失败/时间筛选、服务端分页、详情查看）。
+功能包括：FTP 式目录浏览/上传/下载/删除、拷贝移动、在线编辑（Monaco）、zip 解压、远程终端，顶栏日志抽屉（操作/连接日志合并视图，类型/操作/成功失败/时间筛选、服务端分页、详情查看），以及自绘标题栏（右侧仅在检测到新版本时出现「更新」按钮，点按钮才下载安装）。
 
 ## 技术栈
 
@@ -61,8 +61,8 @@ client/
 │   │   ├── api.rs         reqwest 签名请求、流式上传/下载、错误码映射
 │   │   ├── commands.rs    Tauri 命令（契约 5.2）
 │   │   └── lib.rs         Builder / 状态 / 命令注册
-│   ├── capabilities/default.json   core:default + dialog:allow-open/save
-│   └── tauri.conf.json    productName/mainBinaryName=ScopeFTP，窗口标题 ScopeFTP，identifier com.scopftp.client
+│   ├── capabilities/default.json   core:default + 标题栏窗口操作 + dialog + updater/process
+│   └── tauri.conf.json    productName/mainBinaryName=ScopeFTP，窗口标题 ScopeFTP，macOS Overlay 标题栏，identifier com.scopftp.client
 └── ...
 ```
 

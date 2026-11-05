@@ -12,7 +12,6 @@ import type {
   ServerView,
   StorageRoot,
 } from "../types";
-import type { UpdatePhase } from "../update/useAutoUpdate";
 
 const { Text } = Typography;
 
@@ -23,10 +22,6 @@ export interface ServerSidebarProps {
   /** 同组服务器的连通性（active 自身使用 connection）。 */
   serverHealth: Record<string, ConnectionState>;
   configured: boolean;
-  clientVersion: string;
-  updatePhase: UpdatePhase;
-  availableUpdateVersion: string | null;
-  onCheckUpdate: () => void;
   /** 当前服务器的存储根（task-16；旧单根服务端为空）。 */
   roots: StorageRoot[];
   activeRootId: string | null;
@@ -45,10 +40,6 @@ export default function ServerSidebar({
   connection,
   serverHealth,
   configured,
-  clientVersion,
-  updatePhase,
-  availableUpdateVersion,
-  onCheckUpdate,
   roots,
   activeRootId,
   onSelectRoot,
@@ -233,24 +224,6 @@ export default function ServerSidebar({
           </div>
         </section>
       )}
-
-      <div className="app-update">
-        <Text type="secondary">
-          v{clientVersion}
-          {availableUpdateVersion
-            ? ` · 可更新到 ${availableUpdateVersion}`
-            : ""}
-        </Text>
-        <Button
-          type="link"
-          size="small"
-          loading={updatePhase === "checking" || updatePhase === "downloading"}
-          onClick={onCheckUpdate}
-          data-testid="check-update"
-        >
-          检查更新
-        </Button>
-      </div>
 
       {!configured && (
         <Alert
